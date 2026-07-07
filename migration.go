@@ -1,0 +1,254 @@
+package migrate
+
+import (
+	"crypto/sha256"
+	"encoding/hex"
+	"errors"
+	"fmt"
+	"slices"
+	"strings"
+	"sync"
+)
+
+// Sentinel errors. Failures wrap these, so errors.Is works across the
+// additional context.
+var (
+	// ErrIrreversible marks a rollback of a migration that cannot be
+	// reversed automatically and declares no explicit down.
+	ErrIrreversible = errors.New("migrate: migration cannot be automatically reversed")
+	// ErrLockTimeout marks a failure to acquire the advisory lock, meaning
+	// another migrator held it for the whole wait.
+	ErrLockTimeout = errors.New("migrate: timed out waiting for the migration lock")
+	// ErrChecksumMismatch marks an applied migration whose declaration no
+	// longer produces the SQL it was applied with.
+	ErrChecksumMismatch = errors.New("migrate: checksum mismatch")
+)
+
+// Migration is a registered migration: a name that orders and identifies it,
+// and a declaration function. Values are created by Add and immutable
+// afterwards.
+type Migration struct {
+	name  string
+	up    func(*Schema)
+	down  func(*Schema) // nil means derive by reversing up
+	useTx bool
+}
+
+// Name returns the migration's registered name.
+func (m *Migration) Name() string { return m.name }
+
+// MigrationOption configures a single migration at registration time.
+type MigrationOption func(*Migration)
+
+// WithDown declares an explicit down migration, needed when up records
+// irreversible operations (Drop, DropColumn, Exec, Run) and the migration
+// should still be able to roll back.
+func WithDown(down func(*Schema)) MigrationOption {
+	return func(m *Migration) { m.down = down }
+}
+
+// WithoutTransaction runs the migration outside a transaction, required for
+// statements that refuse to run inside one, such as Postgres's
+// CREATE INDEX CONCURRENTLY. Without a transaction a mid-migration failure
+// leaves earlier statements applied — keep such migrations to a single
+// statement where possible.
+func WithoutTransaction() MigrationOption {
+	return func(m *Migration) { m.useTx = false }
+}
+
+// upOps runs the declaration function and returns the recorded operations.
+func (m *Migration) upOps() ([]operation, error) {
+	s := &Schema{}
+	m.up(s)
+	return s.ops, validateSchema(m.name, s)
+}
+
+// downOps returns the operations that roll the migration back: the explicit
+// down when declared, otherwise the up operations reversed in reverse order.
+func (m *Migration) downOps() ([]operation, error) {
+	if m.down != nil {
+		s := &Schema{}
+		m.down(s)
+		return s.ops, validateSchema(m.name, s)
+	}
+	ups, err := m.upOps()
+	if err != nil {
+		return nil, err
+	}
+	downs := make([]operation, 0, len(ups))
+	for i := len(ups) - 1; i >= 0; i-- {
+		inv, err := ups[i].inverse()
+		if err != nil {
+			return nil, fmt.Errorf("migration %q: %w", m.name, err)
+		}
+		downs = append(downs, inv)
+	}
+	return downs, nil
+}
+
+// validateSchema surfaces declaration mistakes collected while recording.
+func validateSchema(name string, s *Schema) error {
+	errs := append([]error(nil), s.errs...)
+	check := func(table string, cols []*columnDef) {
+		for _, c := range cols {
+			if !c.autoIncr {
+				continue
+			}
+			switch {
+			case !c.integerKind() && c.kind != kindRaw:
+				errs = append(errs, fmt.Errorf("auto-increment column %q of table %q must be an integer", c.name, table))
+			case c.hasDefault:
+				errs = append(errs, fmt.Errorf("auto-increment column %q of table %q cannot have a default value", c.name, table))
+			case c.nullable:
+				errs = append(errs, fmt.Errorf("auto-increment column %q of table %q cannot be nullable", c.name, table))
+			}
+		}
+	}
+	for _, op := range s.ops {
+		switch o := op.(type) {
+		case *createTable:
+			errs = append(errs, o.def.errs...)
+			check(o.def.name, o.def.columns)
+		case *alterTable:
+			errs = append(errs, o.errs...)
+			for _, ch := range o.changes {
+				if add, ok := ch.(*addColumn); ok {
+					check(o.table, []*columnDef{add.col})
+				}
+			}
+		}
+	}
+	if len(errs) == 0 {
+		return nil
+	}
+	return fmt.Errorf("migration %q: %w", name, declarationErrors(errs))
+}
+
+// checksum fingerprints the migration as the SQL it compiles to under the
+// given dialect. Statement text and raw arguments participate; the body of a
+// Run function cannot, so edits to Go logic are not detectable.
+func (m *Migration) checksum(d Dialect) (string, error) {
+	stmts, err := m.compile(d, true)
+	if err != nil {
+		return "", err
+	}
+	h := sha256.New()
+	for _, s := range stmts {
+		if s.fn != nil {
+			h.Write([]byte("<go>\x00"))
+			continue
+		}
+		h.Write([]byte(s.sql))
+		for _, a := range s.args {
+			_, _ = fmt.Fprintf(h, "\x00%v", a)
+		}
+		h.Write([]byte{0})
+	}
+	return hex.EncodeToString(h.Sum(nil)), nil
+}
+
+// compile renders the migration to statements for the dialect.
+func (m *Migration) compile(d Dialect, up bool) ([]statement, error) {
+	ops, err := m.upOps()
+	if !up {
+		ops, err = m.downOps()
+	}
+	if err != nil {
+		return nil, err
+	}
+	var stmts []statement
+	for _, op := range ops {
+		s, err := d.compile(op)
+		if err != nil {
+			return nil, fmt.Errorf("migration %q: %w", m.name, err)
+		}
+		stmts = append(stmts, s...)
+	}
+	return stmts, nil
+}
+
+// Collection is an ordered, named set of migrations. The package-level Add
+// registers into a default collection, which suits the common one-app layout;
+// tests and libraries embedding several migration sets can keep explicit
+// collections instead.
+type Collection struct {
+	mu     sync.Mutex
+	byName map[string]*Migration
+}
+
+// NewCollection returns an empty collection.
+func NewCollection() *Collection {
+	return &Collection{byName: map[string]*Migration{}}
+}
+
+// Add registers a migration. The name orders migrations lexically and is
+// recorded in the database, so give it a sortable timestamp prefix:
+//
+//	c.Add("20260708093000_create_users", func(s *migrate.Schema) { ... })
+//
+// Add panics on an empty, oversized or duplicate name or a nil function:
+// registration happens at init time, where a broken migration set should
+// stop the program.
+func (c *Collection) Add(name string, up func(*Schema), opts ...MigrationOption) {
+	if name == "" {
+		panic("migrate: migration name must not be empty")
+	}
+	if len(name) > 191 {
+		panic(fmt.Sprintf("migrate: migration name %q exceeds 191 characters", name))
+	}
+	if strings.TrimSpace(name) != name {
+		panic(fmt.Sprintf("migrate: migration name %q has leading or trailing whitespace", name))
+	}
+	if up == nil {
+		panic(fmt.Sprintf("migrate: migration %q has a nil up function", name))
+	}
+	m := &Migration{name: name, up: up, useTx: true}
+	for _, opt := range opts {
+		opt(m)
+	}
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if _, dup := c.byName[name]; dup {
+		panic(fmt.Sprintf("migrate: migration %q registered twice", name))
+	}
+	c.byName[name] = m
+}
+
+// get returns the migration registered under name, or nil.
+func (c *Collection) get(name string) *Migration {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.byName[name]
+}
+
+// sorted returns the migrations in name order.
+func (c *Collection) sorted() []*Migration {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	ms := make([]*Migration, 0, len(c.byName))
+	for _, m := range c.byName {
+		ms = append(ms, m)
+	}
+	slices.SortFunc(ms, func(a, b *Migration) int { return strings.Compare(a.name, b.name) })
+	return ms
+}
+
+var defaultCollection = NewCollection()
+
+// Add registers a migration in the default collection, the usual form inside
+// a migrations package where each file registers itself:
+//
+//	func init() {
+//		migrate.Add("20260708093000_create_users", func(s *migrate.Schema) {
+//			s.Create("users", func(t *migrate.Table) {
+//				t.ID()
+//				t.String("email").Unique()
+//				t.Timestamps()
+//			})
+//		})
+//	}
+//
+// See Collection.Add for naming rules and panics.
+func Add(name string, up func(*Schema), opts ...MigrationOption) {
+	defaultCollection.Add(name, up, opts...)
+}
