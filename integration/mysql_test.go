@@ -33,3 +33,5 @@ func TestMySQLEndToEnd(t *testing.T)      { runEndToEnd(t, openMySQL(t), migrate
 func TestMySQLChecksumFlow(t *testing.T)  { runChecksumFlow(t, openMySQL(t), migrate.MySQL) }
 func TestMySQLDataMigration(t *testing.T) { runDataMigration(t, openMySQL(t), migrate.MySQL) }
 func TestMySQLBaseline(t *testing.T)      { runBaseline(t, openMySQL(t), migrate.MySQL) }
+
+func TestMySQLRepeatable(t *testing.T) { runRepeatable(t, openMySQL(t), migrate.MySQL) }

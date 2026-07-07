@@ -25,13 +25,15 @@ var (
 )
 
 // Migration is a registered migration: a name that orders and identifies it,
-// and a declaration function. Values are created by Add and immutable
-// afterwards.
+// and a declaration function. Values are created by Add or AddRepeatable and
+// immutable afterwards.
 type Migration struct {
-	name  string
-	up    func(*Schema)
-	down  func(*Schema) // nil means derive by reversing up
-	useTx bool
+	name       string
+	up         func(*Schema)
+	down       func(*Schema) // nil means derive by reversing up
+	useTx      bool
+	repeatable bool
+	assured    bool // reviewed: skip the safety analysis
 }
 
 // Name returns the migration's registered name.
@@ -107,6 +109,9 @@ func validateSchema(name string, s *Schema) error {
 	for _, op := range s.ops {
 		switch o := op.(type) {
 		case *createTable:
+			errs = append(errs, o.def.errs...)
+			check(o.def.name, o.def.columns)
+		case *recreateTable:
 			errs = append(errs, o.def.errs...)
 			check(o.def.name, o.def.columns)
 		case *alterTable:
@@ -190,6 +195,30 @@ func NewCollection() *Collection {
 // registration happens at init time, where a broken migration set should
 // stop the program.
 func (c *Collection) Add(name string, up func(*Schema), opts ...MigrationOption) {
+	c.add(name, up, false, opts)
+}
+
+// AddRepeatable registers a repeatable migration: instead of running once, it
+// runs whenever its declaration compiles to different SQL than last recorded
+// — after all versioned migrations, in name order. Views, stored functions,
+// triggers and reference data live here, declared idempotently
+// (CREATE OR REPLACE ...), so editing the declaration in place is the whole
+// workflow:
+//
+//	c.AddRepeatable("active_users_view", func(s *migrate.Schema) {
+//		s.Exec(`CREATE OR REPLACE VIEW active_users AS SELECT ...`)
+//	})
+//
+// Rollback never touches repeatable migrations (there is nothing to return
+// to); Reset forgets their records so the next Up runs them again. A Run
+// function's body is invisible to the checksum, so editing only Go logic does
+// not trigger a re-run. Declaring WithDown panics — a repeatable migration
+// has no down.
+func (c *Collection) AddRepeatable(name string, run func(*Schema), opts ...MigrationOption) {
+	c.add(name, run, true, opts)
+}
+
+func (c *Collection) add(name string, up func(*Schema), repeatable bool, opts []MigrationOption) {
 	if name == "" {
 		panic("migrate: migration name must not be empty")
 	}
@@ -202,9 +231,12 @@ func (c *Collection) Add(name string, up func(*Schema), opts ...MigrationOption)
 	if up == nil {
 		panic(fmt.Sprintf("migrate: migration %q has a nil up function", name))
 	}
-	m := &Migration{name: name, up: up, useTx: true}
+	m := &Migration{name: name, up: up, useTx: true, repeatable: repeatable}
 	for _, opt := range opts {
 		opt(m)
+	}
+	if m.repeatable && m.down != nil {
+		panic(fmt.Sprintf("migrate: repeatable migration %q cannot declare WithDown", name))
 	}
 	c.mu.Lock()
 	defer c.mu.Unlock()
@@ -221,13 +253,24 @@ func (c *Collection) get(name string) *Migration {
 	return c.byName[name]
 }
 
-// sorted returns the migrations in name order.
+// sorted returns the versioned migrations in name order.
 func (c *Collection) sorted() []*Migration {
+	return c.list(false)
+}
+
+// repeatables returns the repeatable migrations in name order.
+func (c *Collection) repeatables() []*Migration {
+	return c.list(true)
+}
+
+func (c *Collection) list(repeatable bool) []*Migration {
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	ms := make([]*Migration, 0, len(c.byName))
+	var ms []*Migration
 	for _, m := range c.byName {
-		ms = append(ms, m)
+		if m.repeatable == repeatable {
+			ms = append(ms, m)
+		}
 	}
 	slices.SortFunc(ms, func(a, b *Migration) int { return strings.Compare(a.name, b.name) })
 	return ms
@@ -251,4 +294,10 @@ var defaultCollection = NewCollection()
 // See Collection.Add for naming rules and panics.
 func Add(name string, up func(*Schema), opts ...MigrationOption) {
 	defaultCollection.Add(name, up, opts...)
+}
+
+// AddRepeatable registers a repeatable migration in the default collection.
+// See Collection.AddRepeatable for semantics.
+func AddRepeatable(name string, run func(*Schema), opts ...MigrationOption) {
+	defaultCollection.AddRepeatable(name, run, opts...)
 }

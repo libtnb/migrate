@@ -69,6 +69,11 @@ if err := m.Up(ctx); err != nil {
   it compiled to. If a migration changes after it ran, `Up` warns (or fails,
   under `WithStrictChecksum`), `Status` reports the drift, and `Repair`
   re-records current checksums after a reviewed change.
+- **Repeatable migrations.** Views, stored functions, triggers and reference
+  data registered with `AddRepeatable` re-run whenever their declaration
+  changes — edit the definition in place instead of writing
+  `create_view_v2, _v3, …` migrations. They run after all versioned
+  migrations; rollbacks never touch them.
 - **Reviewable before it runs.** `Plan` renders the SQL of pending migrations
   against a live database; `Collection.SQL` renders a whole collection offline
   for DBA review with no database at all; `PlanRollback` previews a rollback.
@@ -183,6 +188,30 @@ Also available: `t.RenameIndex(from, to)`, `t.DropIndex/DropUnique/DropForeign`
 (by columns, via the conventional names), `t.DropPrimary()`, and table
 comments with `t.Comment(...)`.
 
+### Rebuilding tables
+
+What `ALTER TABLE` cannot express — on SQLite, any constraint change —
+`Recreate` can: declare the complete target table and the migrator rebuilds
+it around the data (create temporary → copy rows → drop old → rename →
+rebuild indexes), inside the migration's transaction on Postgres and SQLite:
+
+```go
+s.Recreate("users", func(t *migrate.Table) {
+	t.ID()
+	t.String("email").Unique()                                 // the new constraint
+	t.Integer("logins").Default(0).SkipCopy()                  // brand-new column
+})
+```
+
+Columns copy by name; `SkipCopy` marks ones the old table does not have.
+Conventional constraint and index names come out for the *final* table name,
+so later `DropUnique`/`DropForeign` calls still resolve. Recreate discards
+the old definition, so rolling back needs a `WithDown` (usually another
+`Recreate` declaring the previous shape). One SQLite caveat: with
+`PRAGMA foreign_keys=ON` and child rows referencing the table, run the
+migration on a connection with enforcement off — enforcement is off by
+default in SQLite and most drivers.
+
 There is deliberately no `Change()` for redefining a column's type in place.
 That API is where migration tools quietly lose modifiers, and SQLite cannot
 do it at all without rebuilding the table. Say what you mean with SQL — it
@@ -234,6 +263,36 @@ migrate.Add("20260810110000_index_events",
 )
 ```
 
+### Repeatable migrations
+
+A versioned migration runs once; a repeatable migration runs whenever its
+compiled SQL differs from what was last recorded. That is the natural home
+for anything defined by replacement — views, stored functions, triggers,
+reference data — where history is noise and only the current definition
+matters:
+
+```go
+migrate.AddRepeatable("active_users_view", func(s *migrate.Schema) {
+	s.Exec(`CREATE OR REPLACE VIEW active_users AS
+	        SELECT * FROM users WHERE deleted_at IS NULL`)
+})
+```
+
+Editing the view is the whole workflow: change the declaration, deploy, and
+the next `Up` re-runs it (after all versioned migrations, in name order).
+Declarations must be idempotent — `CREATE OR REPLACE`, or `DROP ... IF EXISTS`
+followed by `CREATE` on SQLite, which has no `OR REPLACE`. `Status` shows a
+changed repeatable as drifted-pending, `Plan` renders what would re-run, and
+rollbacks leave repeatables untouched (`Reset` forgets their records so a
+fresh `Up` runs them again). A `Run` function's body is invisible to the
+checksum, so edit SQL, not Go, when the change should trigger a re-run.
+
+Two edges worth knowing: rolling back a *versioned* migration whose table a
+repeatable view depends on is refused by Postgres while the view exists —
+drop the dependent object first (deliberate: cascading silently would destroy
+objects you did not name). And on databases without `CREATE OR REPLACE`
+(SQLite), declare idempotency as `DROP ... IF EXISTS` + `CREATE`.
+
 ## Running
 
 | Call | Effect |
@@ -246,6 +305,7 @@ migrate.Add("20260810110000_index_events",
 | `m.Plan(ctx)` / `m.PlanRollback(ctx)` | the SQL that would run, without running it |
 | `m.Baseline(ctx)` | mark migrations applied without executing (existing databases) |
 | `m.Repair(ctx)` | re-record checksums after a reviewed change |
+| `m.Fresh(ctx)` | **development only**: drop every table, re-run everything |
 
 Typical wiring runs `Up` at startup — safe with multiple replicas thanks to
 the advisory lock — or from a dedicated deploy step:
@@ -260,6 +320,30 @@ m, err := migrate.New(db, migrate.Postgres,
 Options: `WithCollection` (explicit collection instead of the global
 registry), `WithTable` (records table name), `WithoutLock`, `WithLockTimeout`,
 `WithStrictChecksum`, `WithLogger`, `WithClock`.
+
+## Safety analysis
+
+Some operations are harmless on an empty development database and incidents
+on a loaded production one: dropping a column running code still reads,
+adding a `NOT NULL` column to a populated table, building an index that
+blocks writes. Because declarations are data, the migrator sees these before
+executing anything:
+
+- **`SafetyWarn`** (default) logs each finding through `WithLogger` and
+  proceeds.
+- **`WithSafety(migrate.SafetyStrict)`** makes `Up` fail with `ErrUnsafe`
+  before executing anything, listing every finding across the run — wire it
+  into CI.
+- **`Assured()`** marks a reviewed migration so the analysis skips it; the
+  finding was considered and accepted (small table, maintenance window, code
+  already deployed).
+
+`Plan` attaches the findings to each planned migration. Creating tables never
+warns, and raw `Exec`/`Run` are deliberately not second-guessed — the
+analysis covers the declarative operations where it can be precise:
+destructive drops, backward-incompatible renames, `NOT NULL` additions
+without defaults, and Postgres index/foreign-key builds that lock large
+tables (with the `CONCURRENTLY` / `NOT VALID` escape routes in the message).
 
 ## Transactions and engines
 

@@ -158,3 +158,105 @@ func TestSQLiteAlterRollback(t *testing.T) {
 		t.Error("nickname should be dropped by the automatic down")
 	}
 }
+
+func TestSQLiteRepeatable(t *testing.T) { runRepeatable(t, openSQLite(t), migrate.SQLite) }
+
+// Recreate rebuilds a table with a new shape while keeping its rows: the only
+// way to change constraints on SQLite. Rows survive, new constraints enforce,
+// and conventional index names are rebuilt for the final table name.
+func TestSQLiteRecreate(t *testing.T) {
+	ctx := context.Background()
+	db := openSQLite(t)
+
+	c := migrate.NewCollection()
+	c.Add("001_users", func(s *migrate.Schema) {
+		s.Create("users", func(t *migrate.Table) {
+			t.ID()
+			t.String("email")
+		})
+	})
+	m, err := migrate.New(db, migrate.SQLite, migrate.WithCollection(c))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := m.Up(ctx); err != nil {
+		t.Fatalf("Up: %v", err)
+	}
+	mustExec(t, db, "INSERT INTO users (email) VALUES ('a@x.dev')")
+	mustExec(t, db, "INSERT INTO users (email) VALUES ('b@x.dev')")
+
+	c.Add("002_unique_emails", func(s *migrate.Schema) {
+		s.Recreate("users", func(t *migrate.Table) {
+			t.ID()
+			t.String("email").Unique()
+			t.Integer("logins").Default(0).SkipCopy()
+		})
+	}, migrate.WithDown(func(s *migrate.Schema) {
+		s.Recreate("users", func(t *migrate.Table) {
+			t.ID()
+			t.String("email")
+		})
+	}))
+	if err := m.Up(ctx); err != nil {
+		t.Fatalf("Up with recreate: %v", err)
+	}
+
+	if got := count(t, db, "SELECT COUNT(*) FROM users"); got != 2 {
+		t.Errorf("rows must survive the rebuild, got %d", got)
+	}
+	if got := count(t, db, "SELECT id FROM users WHERE email = 'b@x.dev'"); got != 2 {
+		t.Errorf("ids must survive the copy, got %d", got)
+	}
+	if got := count(t, db, "SELECT COUNT(*) FROM users WHERE logins = 0"); got != 2 {
+		t.Errorf("the skipped column should take its default, got %d", got)
+	}
+	if _, err := db.Exec("INSERT INTO users (email) VALUES ('a@x.dev')"); err == nil {
+		t.Error("the rebuilt unique index should reject duplicates")
+	}
+	if got := count(t, db, `SELECT COUNT(*) FROM sqlite_master WHERE type = 'index' AND name = 'users_email_unique'`); got != 1 {
+		t.Error("the rebuilt index should carry the conventional final name")
+	}
+	if got := count(t, db, `SELECT COUNT(*) FROM sqlite_master WHERE name LIKE '%__migrate_new%'`); got != 0 {
+		t.Error("no temporary object may survive the rebuild")
+	}
+
+	// The explicit down rebuilds the permissive shape.
+	if err := m.Rollback(ctx, migrate.Steps(1)); err != nil {
+		t.Fatalf("Rollback: %v", err)
+	}
+	mustExec(t, db, "INSERT INTO users (email) VALUES ('a@x.dev')")
+	if got := count(t, db, "SELECT COUNT(*) FROM users WHERE email = 'a@x.dev'"); got != 2 {
+		t.Errorf("after rollback duplicates are allowed again, got %d", got)
+	}
+}
+
+// Fresh drops every table — the drop loop unwinds foreign key dependencies
+// (this connection enforces them) — then reruns all migrations from scratch.
+func TestSQLiteFresh(t *testing.T) {
+	ctx := context.Background()
+	db := openSQLite(t)
+
+	c := appSchema()
+	m, err := migrate.New(db, migrate.SQLite, migrate.WithCollection(c))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := m.Up(ctx); err != nil {
+		t.Fatalf("Up: %v", err)
+	}
+	mustExec(t, db, `INSERT INTO users (email, name) VALUES ('a@x.dev', 'A')`)
+	mustExec(t, db, `INSERT INTO posts (user_id, title) VALUES (1, 'hello')`)
+
+	if err := m.Fresh(ctx); err != nil {
+		t.Fatalf("Fresh: %v", err)
+	}
+	if got := count(t, db, "SELECT COUNT(*) FROM users"); got != 0 {
+		t.Errorf("users should be recreated empty, got %d rows", got)
+	}
+	if got := count(t, db, "SELECT COUNT(*) FROM posts"); got != 0 {
+		t.Errorf("posts should be recreated empty, got %d rows", got)
+	}
+	if got := count(t, db, "SELECT COUNT(*) FROM schema_migrations"); got != 2 {
+		t.Errorf("all migrations should be re-recorded, got %d", got)
+	}
+}

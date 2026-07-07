@@ -109,6 +109,14 @@ func (c *Column) First() *Column {
 	return c
 }
 
+// SkipCopy marks a column that does not exist in the old table during a
+// Schema.Recreate: the row copy leaves it out, so it starts from its default
+// (or NULL). Outside Recreate it has no effect.
+func (c *Column) SkipCopy() *Column {
+	c.def.skipCopy = true
+	return c
+}
+
 // Index is the fluent handle returned by Table.Index and Table.Unique.
 type Index struct {
 	def *indexDef

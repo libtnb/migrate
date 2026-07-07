@@ -14,6 +14,10 @@ import (
 // every dialect round-trips identically with no driver time configuration.
 const appliedAtFormat = "2006-01-02T15:04:05.000000Z"
 
+// repeatableBatch marks records of repeatable migrations, which belong to no
+// batch: rollbacks skip them entirely.
+const repeatableBatch = -1
+
 // Migrator applies and rolls back the migrations of one collection against
 // one database. Methods are safe to call from concurrent processes: runs are
 // serialized by a database advisory lock (see WithoutLock to opt out).
@@ -76,21 +80,76 @@ func (m *Migrator) Up(ctx context.Context) error {
 		}
 		batch++
 
-		pending := 0
+		var pending []*Migration
 		for _, mig := range m.cfg.collection.sorted() {
-			if applied[mig.name] {
-				continue
+			if !applied[mig.name] {
+				pending = append(pending, mig)
 			}
-			if err := m.runOne(ctx, conn, mig, batch, true); err != nil {
+		}
+		due, dueExists, err := m.dueRepeatables(recs)
+		if err != nil {
+			return err
+		}
+		// The safety analysis sees the whole run before anything executes.
+		if err := m.checkSafety(append(append([]*Migration(nil), pending...), due...)); err != nil {
+			return err
+		}
+
+		for _, mig := range pending {
+			bookkeep, err := m.insertRecord(mig, batch)
+			if err != nil {
 				return err
 			}
-			pending++
+			if err := m.runOne(ctx, conn, mig, true, bookkeep); err != nil {
+				return err
+			}
 		}
-		if pending == 0 {
+		for i, mig := range due {
+			var bookkeep statement
+			var err error
+			if dueExists[i] {
+				bookkeep, err = m.updateRecord(mig)
+			} else {
+				bookkeep, err = m.insertRecord(mig, repeatableBatch)
+			}
+			if err != nil {
+				return err
+			}
+			if err := m.runOne(ctx, conn, mig, true, bookkeep); err != nil {
+				return err
+			}
+		}
+		if len(pending)+len(due) == 0 {
 			m.cfg.logger.Info("migrate: nothing to apply")
 		}
 		return nil
 	})
+}
+
+// dueRepeatables resolves which repeatable migrations would run: new ones and
+// those whose declaration no longer compiles to the recorded SQL, in name
+// order. dueExists reports, per migration, whether a record already exists
+// (re-run) or not (first run).
+func (m *Migrator) dueRepeatables(recs []record) (due []*Migration, dueExists []bool, err error) {
+	recorded := make(map[string]string)
+	for _, r := range recs {
+		if r.batch == repeatableBatch {
+			recorded[r.version] = strings.TrimSpace(r.checksum)
+		}
+	}
+	for _, mig := range m.cfg.collection.repeatables() {
+		sum, err := mig.checksum(m.d)
+		if err != nil {
+			return nil, nil, err
+		}
+		prev, exists := recorded[mig.name]
+		if exists && prev == sum {
+			continue
+		}
+		due = append(due, mig)
+		dueExists = append(dueExists, exists)
+	}
+	return due, dueExists, nil
 }
 
 // RollbackOption narrows what Rollback and PlanRollback roll back.
@@ -140,8 +199,17 @@ func (m *Migrator) rollback(ctx context.Context, spec rollbackSpec) error {
 			return nil
 		}
 		for _, mig := range targets {
-			if err := m.runOne(ctx, conn, mig, 0, false); err != nil {
+			if err := m.runOne(ctx, conn, mig, false, m.deleteRecord(mig)); err != nil {
 				return err
+			}
+		}
+		if spec.steps < 0 {
+			// Reset forgets repeatable records — there is no down to run, but
+			// the next Up starts from a clean slate and runs them all again.
+			query := fmt.Sprintf("DELETE FROM %s WHERE batch = %s",
+				m.d.quoteIdent(m.cfg.table), m.d.placeholder(1))
+			if _, err := conn.ExecContext(ctx, query, repeatableBatch); err != nil {
+				return fmt.Errorf("migrate: forget repeatable records: %w", err)
 			}
 		}
 		return nil
@@ -155,6 +223,8 @@ func (m *Migrator) rollbackTargets(ctx context.Context, conn *sql.Conn, spec rol
 	if err != nil {
 		return nil, err
 	}
+	// Repeatable migrations have no down and belong to no batch.
+	recs = slices.DeleteFunc(recs, func(r record) bool { return r.batch == repeatableBatch })
 	if len(recs) == 0 {
 		return nil, nil
 	}
@@ -190,19 +260,14 @@ func (m *Migrator) rollbackTargets(ctx context.Context, conn *sql.Conn, spec rol
 	return targets, nil
 }
 
-// runOne executes one migration in the requested direction and records or
-// removes its row, atomically with the migration itself when transactions
-// are in play.
-func (m *Migrator) runOne(ctx context.Context, conn *sql.Conn, mig *Migration, batch int, up bool) error {
+// runOne executes one migration in the requested direction plus the given
+// bookkeeping mutation, atomically when transactions are in play.
+func (m *Migrator) runOne(ctx context.Context, conn *sql.Conn, mig *Migration, up bool, bookkeep statement) error {
 	verb, verbed := "apply", "applied"
 	if !up {
 		verb, verbed = "roll back", "rolled back"
 	}
 	stmts, err := mig.compile(m.d, up)
-	if err != nil {
-		return err
-	}
-	bookkeep, err := m.bookkeepStatement(mig, batch, up)
 	if err != nil {
 		return err
 	}
@@ -217,7 +282,8 @@ func (m *Migrator) runOne(ctx context.Context, conn *sql.Conn, mig *Migration, b
 	if err != nil {
 		return fmt.Errorf("migrate: %s %q: %w", verb, mig.name, err)
 	}
-	m.cfg.logger.Info("migrate: "+verbed, "migration", mig.name, "duration", time.Since(start).Round(time.Millisecond))
+	m.cfg.logger.Info("migrate: "+verbed, "migration", mig.name, "repeatable", mig.repeatable,
+		"duration", time.Since(start).Round(time.Millisecond))
 	return nil
 }
 
@@ -267,25 +333,41 @@ func describeStatement(s statement) string {
 	return sql
 }
 
-// bookkeepStatement returns the records-table mutation that makes the
-// migration count as applied (or no longer applied).
-func (m *Migrator) bookkeepStatement(mig *Migration, batch int, up bool) (statement, error) {
-	table := m.d.quoteIdent(m.cfg.table)
-	if !up {
-		return statement{
-			sql:  fmt.Sprintf("DELETE FROM %s WHERE version = %s", table, m.d.placeholder(1)),
-			args: []any{mig.name},
-		}, nil
-	}
+// The bookkeeping mutations that run atomically with their migration.
+
+func (m *Migrator) insertRecord(mig *Migration, batch int) (statement, error) {
 	sum, err := mig.checksum(m.d)
 	if err != nil {
 		return statement{}, err
 	}
 	return statement{
 		sql: fmt.Sprintf("INSERT INTO %s (version, batch, checksum, applied_at) VALUES (%s, %s, %s, %s)",
-			table, m.d.placeholder(1), m.d.placeholder(2), m.d.placeholder(3), m.d.placeholder(4)),
-		args: []any{mig.name, batch, sum, m.cfg.clock.Now().UTC().Format(appliedAtFormat)},
+			m.d.quoteIdent(m.cfg.table), m.d.placeholder(1), m.d.placeholder(2), m.d.placeholder(3), m.d.placeholder(4)),
+		args: []any{mig.name, batch, sum, m.now()},
 	}, nil
+}
+
+func (m *Migrator) updateRecord(mig *Migration) (statement, error) {
+	sum, err := mig.checksum(m.d)
+	if err != nil {
+		return statement{}, err
+	}
+	return statement{
+		sql: fmt.Sprintf("UPDATE %s SET checksum = %s, applied_at = %s WHERE version = %s",
+			m.d.quoteIdent(m.cfg.table), m.d.placeholder(1), m.d.placeholder(2), m.d.placeholder(3)),
+		args: []any{sum, m.now(), mig.name},
+	}, nil
+}
+
+func (m *Migrator) deleteRecord(mig *Migration) statement {
+	return statement{
+		sql:  fmt.Sprintf("DELETE FROM %s WHERE version = %s", m.d.quoteIdent(m.cfg.table), m.d.placeholder(1)),
+		args: []any{mig.name},
+	}
+}
+
+func (m *Migrator) now() string {
+	return m.cfg.clock.Now().UTC().Format(appliedAtFormat)
 }
 
 // loadState ensures the records table exists and returns its rows in name
@@ -317,10 +399,12 @@ func (m *Migrator) loadState(ctx context.Context, db DB) ([]record, error) {
 // verifyChecksums compares each applied migration against what its current
 // declaration compiles to. A mismatch means the migration changed after it
 // ran — a warning by default, an error under WithStrictChecksum. Records
-// without a checksum (from Baseline of older tooling) are skipped.
+// without a checksum (from Baseline of older tooling) are skipped, as are
+// repeatable records: for those a changed checksum just means a pending
+// re-run.
 func (m *Migrator) verifyChecksums(recs []record) error {
 	for _, r := range recs {
-		if strings.TrimSpace(r.checksum) == "" {
+		if r.batch == repeatableBatch || strings.TrimSpace(r.checksum) == "" {
 			continue
 		}
 		mig := m.cfg.collection.get(r.version)

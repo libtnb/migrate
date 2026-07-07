@@ -34,6 +34,7 @@ type config struct {
 	lock           bool
 	lockTimeout    time.Duration
 	strictChecksum bool
+	safety         SafetyLevel
 	logger         *slog.Logger
 	clock          Clock
 }

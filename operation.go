@@ -73,6 +73,8 @@ type columnDef struct {
 	comment string
 	after   string
 	first   bool
+
+	skipCopy bool // Recreate: no matching column in the old table
 }
 
 // integerKind reports whether the column type can auto-increment.
@@ -116,6 +118,18 @@ type tableDef struct {
 	primary []string // composite primary key columns
 	comment string
 	errs    []error // declaration mistakes, surfaced at compile time
+
+	// constraintBase, when set, names constraints as if the table were
+	// called this. Recreate compiles its temporary table with the final
+	// name here, so conventional constraint names survive the rename.
+	constraintBase string
+}
+
+func (d *tableDef) constraintTable() string {
+	if d.constraintBase != "" {
+		return d.constraintBase
+	}
+	return d.name
 }
 
 // Conventional constraint names, shared by every dialect so that dropping by
@@ -194,6 +208,14 @@ func (o *alterTable) inverse() (operation, error) {
 		inv.changes = append(inv.changes, cs...)
 	}
 	return inv, nil
+}
+
+type recreateTable struct {
+	def *tableDef
+}
+
+func (o *recreateTable) inverse() (operation, error) {
+	return nil, irreversible("recreating table %q discards its previous definition", o.def.name)
 }
 
 type rawSQL struct {

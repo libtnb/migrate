@@ -100,3 +100,5 @@ func TestPostgresFailedMigrationLeavesNoTrace(t *testing.T) {
 		t.Errorf("no record may exist, got %d", got)
 	}
 }
+
+func TestPostgresRepeatable(t *testing.T) { runRepeatable(t, openPostgres(t), migrate.Postgres) }

@@ -88,6 +88,41 @@ func (s *Schema) Table(table string, fn func(*Table)) {
 	s.record(alter)
 }
 
+// Recreate replaces a table with a new definition while preserving its rows,
+// the portable way to change what ALTER TABLE cannot — on SQLite that is any
+// constraint change. The function declares the complete target table, exactly
+// like Create; every declared column is copied from the old table by name,
+// except those marked SkipCopy, which start from their default:
+//
+//	s.Recreate("users", func(t *migrate.Table) {
+//		t.ID()
+//		t.String("email").Unique()
+//		t.ForeignID("team_id").Constrained().Nullable().SkipCopy() // new column
+//	})
+//
+// It compiles to: create a temporary table with the new shape, copy the rows,
+// drop the old table, rename into place, rebuild indexes. On Postgres and
+// SQLite the whole sequence runs inside the migration's transaction. Child
+// tables referencing the recreated one keep working — their foreign keys
+// resolve by name once the rename lands — but with SQLite foreign key
+// enforcement enabled (PRAGMA foreign_keys=ON) and referencing rows present,
+// run the migration on a connection with enforcement off.
+//
+// Recreate discards the previous definition and is therefore irreversible;
+// rolling back requires WithDown.
+func (s *Schema) Recreate(table string, fn func(*Table)) {
+	s.requireTable("Recreate", table)
+	def := &tableDef{name: table}
+	t := &Table{table: table, create: def}
+	if fn != nil {
+		fn(t)
+	}
+	if len(def.columns) == 0 {
+		s.errf("Recreate(%q) declares no columns", table)
+	}
+	s.record(&recreateTable{def: def})
+}
+
 // Rename renames a table. It reverses to the opposite rename.
 func (s *Schema) Rename(from, to string) {
 	s.requireTable("Rename", from)

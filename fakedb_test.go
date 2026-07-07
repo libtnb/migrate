@@ -19,6 +19,7 @@ type fakeDB struct {
 	log      []string
 	args     [][]driver.NamedValue
 	records  []record // rows served for records-table SELECTs
+	tables   []string // rows served for list-tables queries
 	failOn   string   // substring that makes Exec/Query fail
 	failErr  error
 	denyLock bool // advisory lock attempts report "not acquired"
@@ -139,6 +140,13 @@ func (c *fakeConn) QueryContext(_ context.Context, query string, _ []driver.Name
 			rows[i] = []driver.Value{r.version, int64(r.batch), r.checksum, r.appliedAt}
 		}
 		return &fakeRows{cols: []string{"version", "batch", "checksum", "applied_at"}, rows: rows}, nil
+	case strings.Contains(query, "pg_tables"), strings.Contains(query, "information_schema.tables"),
+		strings.Contains(query, "sqlite_master"):
+		rows := make([][]driver.Value, len(c.db.tables))
+		for i, t := range c.db.tables {
+			rows[i] = []driver.Value{t}
+		}
+		return &fakeRows{cols: []string{"name"}, rows: rows}, nil
 	default:
 		return &fakeRows{cols: []string{}}, nil
 	}

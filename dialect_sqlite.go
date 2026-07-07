@@ -13,9 +13,10 @@ import (
 //
 // SQLite cannot alter constraints after a table exists: adding or dropping
 // foreign keys and primary keys compiles to a clear error rather than
-// silently skipping the change (declare them when creating the table, or
-// rebuild the table with raw SQL). Advisory locking is a no-op — the database
-// file itself serializes writers.
+// silently skipping the change — declare them when creating the table, or
+// change them with Schema.Recreate, which rebuilds the table while keeping
+// its rows. Advisory locking is a no-op — the database file itself
+// serializes writers.
 var SQLite Dialect = sqliteDialect{}
 
 type sqliteDialect struct{}
@@ -46,6 +47,10 @@ func (d sqliteDialect) compile(op operation) ([]statement, error) {
 		return []statement{sqlStatement("ALTER TABLE %s RENAME TO %s", liteQ.ident(o.from), liteQ.ident(o.to))}, nil
 	case *alterTable:
 		return d.compileAlter(o)
+	case *recreateTable:
+		return compileRecreate(d, liteQ, func(from, to string) statement {
+			return sqlStatement("ALTER TABLE %s RENAME TO %s", liteQ.ident(from), liteQ.ident(to))
+		}, o.def)
 	case *rawSQL:
 		return []statement{{sql: o.sql, args: o.args}}, nil
 	case *goFunc:
@@ -63,7 +68,7 @@ func (d sqliteDialect) compileCreate(def *tableDef) ([]statement, error) {
 
 	clauses := make([]string, 0, len(def.columns)+len(def.fks)+1)
 	for _, c := range def.columns {
-		clause, err := d.columnSQL(def.name, c)
+		clause, err := d.columnSQL(def.constraintTable(), c)
 		if err != nil {
 			return nil, err
 		}
@@ -71,10 +76,10 @@ func (d sqliteDialect) compileCreate(def *tableDef) ([]statement, error) {
 	}
 	if len(pk) > 0 {
 		clauses = append(clauses, fmt.Sprintf("CONSTRAINT %s PRIMARY KEY (%s)",
-			liteQ.ident(primaryName(def.name)), liteQ.idents(pk)))
+			liteQ.ident(primaryName(def.constraintTable())), liteQ.idents(pk)))
 	}
 	for _, fk := range def.fks {
-		clauses = append(clauses, foreignClause(liteQ, def.name, fk))
+		clauses = append(clauses, foreignClause(liteQ, def.constraintTable(), fk))
 	}
 
 	stmts := []statement{sqlStatement("CREATE TABLE %s (\n\t%s\n)",
@@ -92,7 +97,7 @@ func (d sqliteDialect) compileAlter(op *alterTable) ([]statement, error) {
 		switch c := ch.(type) {
 		case *addColumn:
 			if c.col.autoIncr {
-				return nil, fmt.Errorf("migrate: sqlite cannot add auto-increment column %q to existing table %q; declare it in Create, or rebuild the table with raw SQL", c.col.name, op.table)
+				return nil, fmt.Errorf("migrate: sqlite cannot add auto-increment column %q to existing table %q; declare it in Create, or use Schema.Recreate", c.col.name, op.table)
 			}
 			clause, err := d.columnSQL(op.table, c.col)
 			if err != nil {
@@ -115,13 +120,13 @@ func (d sqliteDialect) compileAlter(op *alterTable) ([]statement, error) {
 		case *setTableComment:
 			// SQLite has no table comments; the declaration is documentation.
 		case *addForeign:
-			return nil, fmt.Errorf("migrate: sqlite cannot add a foreign key to existing table %q; declare it in Create, or rebuild the table with raw SQL", op.table)
+			return nil, fmt.Errorf("migrate: sqlite cannot add a foreign key to existing table %q; declare it in Create, or use Schema.Recreate", op.table)
 		case *dropForeign:
-			return nil, fmt.Errorf("migrate: sqlite cannot drop a foreign key from table %q; rebuild the table with raw SQL", op.table)
+			return nil, fmt.Errorf("migrate: sqlite cannot drop a foreign key from table %q; use Schema.Recreate", op.table)
 		case *addPrimary:
-			return nil, fmt.Errorf("migrate: sqlite cannot add a primary key to existing table %q; declare it in Create, or rebuild the table with raw SQL", op.table)
+			return nil, fmt.Errorf("migrate: sqlite cannot add a primary key to existing table %q; declare it in Create, or use Schema.Recreate", op.table)
 		case *dropPrimary:
-			return nil, fmt.Errorf("migrate: sqlite cannot drop the primary key of table %q; rebuild the table with raw SQL", op.table)
+			return nil, fmt.Errorf("migrate: sqlite cannot drop the primary key of table %q; use Schema.Recreate", op.table)
 		default:
 			return nil, fmt.Errorf("migrate: sqlite: unsupported change %T", ch)
 		}
@@ -198,3 +203,11 @@ func (sqliteDialect) lock(context.Context, *sql.Conn, string, time.Duration) err
 func (sqliteDialect) unlock(context.Context, *sql.Conn, string) error              { return nil }
 
 func (sqliteDialect) quoteIdent(name string) string { return liteQ.ident(name) }
+
+func (sqliteDialect) listTablesSQL() string {
+	return "SELECT name FROM sqlite_master WHERE type = 'table' AND name NOT LIKE 'sqlite_%'"
+}
+
+func (sqliteDialect) freshDropSQL(table string) string {
+	return fmt.Sprintf("DROP TABLE IF EXISTS %s", liteQ.ident(table))
+}

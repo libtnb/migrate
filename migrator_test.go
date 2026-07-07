@@ -266,7 +266,9 @@ func TestResetRollsBackEverything(t *testing.T) {
 	if err := m.Reset(context.Background()); err != nil {
 		t.Fatalf("Reset: %v", err)
 	}
-	if len(f.loggedContaining("DROP TABLE")) != 2 || len(f.loggedContaining("DELETE FROM")) != 2 {
+	// Two per-migration record deletions plus the sweep that forgets
+	// repeatable records.
+	if len(f.loggedContaining("DROP TABLE")) != 2 || len(f.loggedContaining("DELETE FROM")) != 3 {
 		t.Errorf("Reset should undo both migrations; log:\n%s", strings.Join(f.logged(), "\n"))
 	}
 }
@@ -527,4 +529,28 @@ func TestUpNothingPending(t *testing.T) {
 	if len(f.loggedContaining("BEGIN")) != 0 {
 		t.Error("nothing should execute")
 	}
+}
+
+func TestFreshDropsEverythingThenMigrates(t *testing.T) {
+	f := newFakeDB()
+	f.tables = []string{"users", "schema_migrations", "stragglers"}
+	m := testMigrator(t, f, Postgres, twoTables())
+	if err := m.Fresh(context.Background()); err != nil {
+		t.Fatalf("Fresh: %v", err)
+	}
+	for _, table := range []string{`"users"`, `"schema_migrations"`, `"stragglers"`} {
+		if len(f.loggedContaining("DROP TABLE IF EXISTS "+table+" CASCADE")) != 1 {
+			t.Errorf("expected a cascade drop of %s", table)
+		}
+	}
+	// After dropping, the full migration run happens: table recreated,
+	// both migrations applied and recorded.
+	assertLogSequence(t, f.logged(), []string{
+		"DROP TABLE IF EXISTS",
+		"CREATE TABLE IF NOT EXISTS \"schema_migrations\"",
+		`CREATE TABLE "users"`,
+		"INSERT INTO",
+		`CREATE TABLE "posts"`,
+		"INSERT INTO",
+	})
 }

@@ -39,6 +39,10 @@ func (d postgresDialect) compile(op operation) ([]statement, error) {
 		return []statement{sqlStatement("ALTER TABLE %s RENAME TO %s", pgQ.ident(o.from), pgQ.ident(o.to))}, nil
 	case *alterTable:
 		return d.compileAlter(o)
+	case *recreateTable:
+		return compileRecreate(d, pgQ, func(from, to string) statement {
+			return sqlStatement("ALTER TABLE %s RENAME TO %s", pgQ.ident(from), pgQ.ident(to))
+		}, o.def)
 	case *rawSQL:
 		return []statement{{sql: o.sql, args: o.args}}, nil
 	case *goFunc:
@@ -57,7 +61,7 @@ func (d postgresDialect) compileCreate(def *tableDef) ([]statement, error) {
 	clauses := make([]string, 0, len(def.columns)+len(def.fks)+1)
 	var comments []statement
 	for _, c := range def.columns {
-		clause, err := d.columnSQL(def.name, c)
+		clause, err := d.columnSQL(def.constraintTable(), c)
 		if err != nil {
 			return nil, err
 		}
@@ -68,10 +72,10 @@ func (d postgresDialect) compileCreate(def *tableDef) ([]statement, error) {
 	}
 	if len(pk) > 0 {
 		clauses = append(clauses, fmt.Sprintf("CONSTRAINT %s PRIMARY KEY (%s)",
-			pgQ.ident(primaryName(def.name)), pgQ.idents(pk)))
+			pgQ.ident(primaryName(def.constraintTable())), pgQ.idents(pk)))
 	}
 	for _, fk := range def.fks {
-		clauses = append(clauses, foreignClause(pgQ, def.name, fk))
+		clauses = append(clauses, foreignClause(pgQ, def.constraintTable(), fk))
 	}
 
 	stmts := []statement{sqlStatement("CREATE TABLE %s (\n\t%s\n)",
@@ -262,4 +266,14 @@ func (postgresDialect) quoteIdent(name string) string { return pgQ.ident(name) }
 
 func (postgresDialect) tableCommentSQL(table, comment string) statement {
 	return sqlStatement("COMMENT ON TABLE %s IS '%s'", pgQ.ident(table), strings.ReplaceAll(comment, "'", "''"))
+}
+
+func (postgresDialect) listTablesSQL() string {
+	return "SELECT tablename FROM pg_tables WHERE schemaname = current_schema()"
+}
+
+// CASCADE also removes dependent objects such as views, which plain table
+// drops would trip over.
+func (postgresDialect) freshDropSQL(table string) string {
+	return fmt.Sprintf("DROP TABLE IF EXISTS %s CASCADE", pgQ.ident(table))
 }

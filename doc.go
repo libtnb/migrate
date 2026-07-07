@@ -39,6 +39,11 @@
 // requires an explicit down declared with WithDown, and is otherwise refused
 // with ErrIrreversible.
 //
+// Migrations registered with AddRepeatable run whenever their declaration
+// changes rather than once: views, stored functions and reference data are
+// edited in place, and the next Up re-runs them after all versioned
+// migrations.
+//
 // Concurrent migrators (replicas racing at deploy time) are serialized with a
 // session-level advisory lock on Postgres and MySQL, which the database
 // releases automatically if a migrator crashes. A failed migration rolls back

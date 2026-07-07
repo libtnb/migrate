@@ -9,6 +9,7 @@ import (
 	"context"
 	"database/sql"
 	"errors"
+	"fmt"
 	"testing"
 
 	"github.com/libtnb/migrate"
@@ -218,6 +219,86 @@ func runDataMigration(t *testing.T, db *sql.DB, dialect migrate.Dialect) {
 	}
 	if err := m.Rollback(ctx); err != nil {
 		t.Fatalf("Rollback via explicit down: %v", err)
+	}
+}
+
+// runRepeatable verifies the full repeatable lifecycle against a live
+// database: first run creates the view, an unchanged run skips it, an edited
+// declaration re-runs it, and rollback leaves it alone.
+func runRepeatable(t *testing.T, db *sql.DB, dialect migrate.Dialect) {
+	ctx := context.Background()
+	dropAll(t, db)
+	if _, err := db.Exec("DROP VIEW IF EXISTS adults"); err != nil {
+		t.Fatalf("drop view: %v", err)
+	}
+
+	// SQLite has no CREATE OR REPLACE VIEW; drop-then-create is the portable
+	// idempotent declaration and exercises multi-statement repeatables.
+	build := func(minAge int) *migrate.Collection {
+		c := migrate.NewCollection()
+		c.Add("001_people", func(s *migrate.Schema) {
+			s.Create("people", func(t *migrate.Table) {
+				t.ID()
+				t.String("name")
+				t.Integer("age")
+			})
+		})
+		c.AddRepeatable("adults_view", func(s *migrate.Schema) {
+			s.Exec("DROP VIEW IF EXISTS adults")
+			s.Exec(fmt.Sprintf("CREATE VIEW adults AS SELECT name FROM people WHERE age >= %d", minAge))
+		})
+		return c
+	}
+
+	m18, err := migrate.New(db, dialect, migrate.WithCollection(build(18)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := m18.Up(ctx); err != nil {
+		t.Fatalf("first Up: %v", err)
+	}
+	mustExec(t, db, "INSERT INTO people (name, age) VALUES ('kid', 12)")
+	mustExec(t, db, "INSERT INTO people (name, age) VALUES ('teen', 19)")
+	mustExec(t, db, "INSERT INTO people (name, age) VALUES ('adult', 30)")
+	if got := count(t, db, "SELECT COUNT(*) FROM adults"); got != 2 {
+		t.Fatalf("view with age >= 18 should see 2 rows, got %d", got)
+	}
+
+	// Unchanged: nothing to do, view keeps working.
+	if err := m18.Up(ctx); err != nil {
+		t.Fatalf("second Up: %v", err)
+	}
+
+	// Edited declaration re-runs against the same records table.
+	m21, err := migrate.New(db, dialect, migrate.WithCollection(build(21)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	plans, err := m21.Plan(ctx)
+	if err != nil {
+		t.Fatalf("Plan: %v", err)
+	}
+	if len(plans) != 1 || plans[0].Name != "adults_view" {
+		t.Fatalf("plan should contain just the due repeatable, got %+v", plans)
+	}
+	if err := m21.Up(ctx); err != nil {
+		t.Fatalf("Up after edit: %v", err)
+	}
+	if got := count(t, db, "SELECT COUNT(*) FROM adults"); got != 1 {
+		t.Fatalf("view with age >= 21 should see 1 row, got %d", got)
+	}
+
+	// Rolling back the table the view depends on: Postgres refuses while the
+	// view exists (dependency protection — exactly right), so the real-world
+	// flow drops the dependent object first.
+	if _, err := db.Exec("DROP VIEW IF EXISTS adults"); err != nil {
+		t.Fatalf("drop dependent view: %v", err)
+	}
+	if err := m21.Rollback(ctx, migrate.Steps(1)); err != nil {
+		t.Fatalf("Rollback: %v", err)
+	}
+	if got := count(t, db, "SELECT COUNT(*) FROM schema_migrations WHERE batch = -1"); got != 1 {
+		t.Fatalf("the repeatable record must survive rollbacks, got %d", got)
 	}
 }
 

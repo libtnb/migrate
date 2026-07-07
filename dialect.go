@@ -33,6 +33,13 @@ type Dialect interface {
 	// dedicated connection.
 	lock(ctx context.Context, conn *sql.Conn, table string, timeout time.Duration) error
 	unlock(ctx context.Context, conn *sql.Conn, table string) error
+
+	// listTablesSQL queries the names of every base table in the current
+	// schema, one string column.
+	listTablesSQL() string
+	// freshDropSQL drops one table during Fresh, cascading where the engine
+	// supports it.
+	freshDropSQL(table string) string
 }
 
 // statement is one executable unit of a compiled migration: either SQL text
@@ -207,4 +214,53 @@ func declarationErrors(errs []error) error {
 		return nil
 	}
 	return fmt.Errorf("migrate: invalid declaration: %w", errors.Join(errs...))
+}
+
+// compileRecreate builds the move-and-copy sequence shared by every dialect:
+// create a temporary table with the target shape, copy the surviving rows,
+// drop the old table, rename into place, rebuild indexes. Constraints on the
+// temporary table are pinned to their conventional final names via
+// constraintBase, so nothing keeps a temporary name after the rename. Child
+// foreign keys referencing the table resolve by name again once the rename
+// lands — the same order Alembic uses for SQLite batch mode.
+func compileRecreate(d Dialect, q quoter, renameSQL func(from, to string) statement, def *tableDef) ([]statement, error) {
+	tmp := def.name + "__migrate_new"
+	tmpDef := &tableDef{
+		name:           tmp,
+		constraintBase: def.name,
+		primary:        def.primary,
+		comment:        def.comment,
+	}
+	for _, c := range def.columns {
+		cc := *c
+		cc.unique, cc.indexed = false, false // indexes rebuild after the rename
+		tmpDef.columns = append(tmpDef.columns, &cc)
+	}
+	for _, fk := range def.fks {
+		f := *fk
+		f.name = fk.resolvedName(def.name)
+		tmpDef.fks = append(tmpDef.fks, &f)
+	}
+
+	stmts, err := d.compile(&createTable{def: tmpDef})
+	if err != nil {
+		return nil, err
+	}
+	var copyCols []string
+	for _, c := range def.columns {
+		if !c.skipCopy {
+			copyCols = append(copyCols, c.name)
+		}
+	}
+	if len(copyCols) > 0 {
+		stmts = append(stmts, sqlStatement("INSERT INTO %s (%s) SELECT %s FROM %s",
+			q.ident(tmp), q.idents(copyCols), q.idents(copyCols), q.ident(def.name)))
+	}
+	stmts = append(stmts,
+		sqlStatement("DROP TABLE %s", q.ident(def.name)),
+		renameSQL(tmp, def.name))
+	for _, idx := range append(inlineIndexes(def.columns), def.indexes...) {
+		stmts = append(stmts, statement{sql: createIndexSQL(q, def.name, idx)})
+	}
+	return stmts, nil
 }

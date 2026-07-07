@@ -44,6 +44,10 @@ func (d mysqlDialect) compile(op operation) ([]statement, error) {
 		return []statement{sqlStatement("RENAME TABLE %s TO %s", myQ.ident(o.from), myQ.ident(o.to))}, nil
 	case *alterTable:
 		return d.compileAlter(o)
+	case *recreateTable:
+		return compileRecreate(d, myQ, func(from, to string) statement {
+			return sqlStatement("RENAME TABLE %s TO %s", myQ.ident(from), myQ.ident(to))
+		}, o.def)
 	case *rawSQL:
 		return []statement{{sql: o.sql, args: o.args}}, nil
 	case *goFunc:
@@ -73,7 +77,7 @@ func (d mysqlDialect) compileCreate(def *tableDef) ([]statement, error) {
 		clauses = append(clauses, fmt.Sprintf("PRIMARY KEY (%s)", myQ.idents(pk)))
 	}
 	for _, fk := range def.fks {
-		clauses = append(clauses, foreignClause(myQ, def.name, fk))
+		clauses = append(clauses, foreignClause(myQ, def.constraintTable(), fk))
 	}
 
 	suffix := ""
@@ -266,4 +270,12 @@ func (mysqlDialect) quoteIdent(name string) string { return myQ.ident(name) }
 // backslash is an escape character unless NO_BACKSLASH_ESCAPES is set.
 func mysqlEscape(s string) string {
 	return strings.ReplaceAll(strings.ReplaceAll(s, `\`, `\\`), "'", "''")
+}
+
+func (mysqlDialect) listTablesSQL() string {
+	return "SELECT table_name FROM information_schema.tables WHERE table_schema = DATABASE() AND table_type = 'BASE TABLE'"
+}
+
+func (mysqlDialect) freshDropSQL(table string) string {
+	return fmt.Sprintf("DROP TABLE IF EXISTS %s", myQ.ident(table))
 }
