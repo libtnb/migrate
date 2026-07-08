@@ -218,6 +218,11 @@ s.Recreate("users", func(t *migrate.Table) {
 })
 ```
 
+`Recreate` needs its transaction (combining it with `WithoutTransaction` is a
+compile-time error), and on Postgres a table referenced by other tables'
+foreign keys or by views cannot be rebuilt — the drop is refused and the
+transaction rolls back cleanly; use native `ALTER` there instead.
+
 Columns copy by name; `SkipCopy` marks ones the old table does not have, and
 `CopyFrom` substitutes a SELECT expression — renaming a column and converting
 its type in one rebuild:

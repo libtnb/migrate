@@ -183,6 +183,16 @@ func (m *Migration) compile(d Dialect, up bool) ([]statement, error) {
 	if err != nil {
 		return nil, err
 	}
+	if !m.useTx {
+		for _, op := range ops {
+			if _, ok := op.(*recreateTable); ok {
+				// Without the transaction, a failure between the DROP and the
+				// rename leaves the live table gone — the exact window the
+				// MySQL gate exists for.
+				return nil, fmt.Errorf("migration %q: Recreate requires the migration's transaction; keep WithoutTransaction statements in a separate migration", m.name)
+			}
+		}
+	}
 	var stmts []statement
 	for _, op := range ops {
 		s, err := d.compile(op)

@@ -156,13 +156,22 @@ func (m *Migrator) dueRepeatables(recs []record) (due []*Migration, dueExists []
 type RollbackOption func(*rollbackSpec)
 
 type rollbackSpec struct {
-	steps int // 0 means the whole latest batch
+	steps   int // 0 means the whole latest batch
+	reset   bool
+	invalid error
 }
 
 // Steps limits the rollback to the n most recently applied migrations,
-// regardless of batches.
+// regardless of batches. n must be positive; anything else makes Rollback
+// fail instead of silently widening its blast radius.
 func Steps(n int) RollbackOption {
-	return func(s *rollbackSpec) { s.steps = n }
+	return func(s *rollbackSpec) {
+		if n < 1 {
+			s.invalid = fmt.Errorf("migrate: Steps requires a positive count, got %d", n)
+			return
+		}
+		s.steps = n
+	}
 }
 
 // Rollback reverses the most recent batch of migrations (or the given Steps)
@@ -177,7 +186,7 @@ func (m *Migrator) Rollback(ctx context.Context, opts ...RollbackOption) error {
 // Reset rolls back everything that was ever applied, leaving an empty
 // database. Every applied migration must be reversible or declare a down.
 func (m *Migrator) Reset(ctx context.Context) error {
-	return m.rollback(ctx, rollbackSpec{steps: -1})
+	return m.rollback(ctx, rollbackSpec{reset: true})
 }
 
 func resolveSpec(opts []RollbackOption) rollbackSpec {
@@ -203,7 +212,7 @@ func (m *Migrator) rollback(ctx context.Context, spec rollbackSpec) error {
 				return err
 			}
 		}
-		if spec.steps < 0 {
+		if spec.reset {
 			// Reset forgets repeatable records — there is no down to run, but
 			// the next Up starts from a clean slate and runs them all again.
 			query := fmt.Sprintf("DELETE FROM %s WHERE batch = %s",
@@ -219,13 +228,16 @@ func (m *Migrator) rollback(ctx context.Context, spec rollbackSpec) error {
 // rollbackTargets resolves which applied migrations the spec selects, newest
 // first, failing when one of them is not registered in the collection.
 func (m *Migrator) rollbackTargets(ctx context.Context, conn *sql.Conn, spec rollbackSpec) ([]*Migration, error) {
+	if spec.invalid != nil {
+		return nil, spec.invalid
+	}
 	recs, err := m.loadState(ctx, conn)
 	if err != nil {
 		return nil, err
 	}
 	// Repeatable migrations have no down and belong to no batch.
 	recs = slices.DeleteFunc(recs, func(r record) bool { return r.batch == repeatableBatch })
-	if spec.steps >= 0 {
+	if !spec.reset {
 		// Baselined rows (batch 0) were never executed by this tool; only an
 		// explicit Reset rolls them back. Without this, once every real batch
 		// is undone the baseline would become the "latest batch" and a plain
@@ -244,7 +256,7 @@ func (m *Migrator) rollbackTargets(ctx context.Context, conn *sql.Conn, spec rol
 		return strings.Compare(b.version, a.version)
 	})
 	switch {
-	case spec.steps < 0: // Reset
+	case spec.reset:
 	case spec.steps > 0:
 		recs = recs[:min(spec.steps, len(recs))]
 	default:

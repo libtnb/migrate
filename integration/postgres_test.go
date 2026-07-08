@@ -167,3 +167,43 @@ func TestPostgresRecreate(t *testing.T) {
 	}
 	mustExec(t, db, "DROP TABLE IF EXISTS counters")
 }
+
+// Codex round 2: recreating a parent table referenced by child foreign keys
+// is impossible on Postgres (definition-level dependency). The failure must
+// be clean — transaction rolled back, original table and data intact.
+func TestPostgresRecreateReferencedParentFailsCleanly(t *testing.T) {
+	ctx := context.Background()
+	db := openPostgres(t)
+	dropAll(t, db)
+
+	c := appSchema() // users + posts (posts.user_id → users.id)
+	m, err := migrate.New(db, migrate.Postgres, migrate.WithCollection(c))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := m.Up(ctx); err != nil {
+		t.Fatalf("Up: %v", err)
+	}
+	mustExec(t, db, `INSERT INTO users (email, name) VALUES ('a@x.dev', 'A')`)
+
+	c.Add("003_rebuild_users", func(s *migrate.Schema) {
+		s.Recreate("users", func(t *migrate.Table) {
+			t.ID()
+			t.String("email").Unique()
+			t.String("name", 100)
+			t.Enum("role", "admin", "member").Default("member")
+			t.Timestamps()
+		})
+	}, migrate.WithDown(func(s *migrate.Schema) {}))
+	if err := m.Up(ctx); err == nil {
+		t.Fatal("recreating a referenced parent must fail on Postgres")
+	}
+	// Clean failure: table, data and records intact; the failed migration
+	// unrecorded so a fixed version can run.
+	if got := count(t, db, `SELECT COUNT(*) FROM users`); got != 1 {
+		t.Errorf("users must survive the failed rebuild, got %d rows", got)
+	}
+	if got := count(t, db, `SELECT COUNT(*) FROM schema_migrations`); got != 2 {
+		t.Errorf("the failed migration must not be recorded, got %d records", got)
+	}
+}

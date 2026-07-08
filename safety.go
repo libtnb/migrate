@@ -51,7 +51,7 @@ func analyzeSafety(dialect string, ops []operation) []string {
 	for _, op := range ops {
 		switch o := op.(type) {
 		case *recreateTable:
-			warn("recreating table %q copies every row while holding locks; plan for the copy time on large tables", o.def.name)
+			warn("recreating table %q copies every row while holding locks; plan for the copy time on large tables, and note that a table referenced by foreign keys or views cannot be recreated on Postgres", o.def.name)
 		case *dropTable:
 			warn("dropping table %q breaks application code still using it; deploy code that stopped using it first", o.name)
 		case *renameTable:

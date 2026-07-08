@@ -103,13 +103,19 @@ func (s *Schema) Table(table string, fn func(*Table)) {
 // It compiles to: create a temporary table with the new shape, copy the rows,
 // drop the old table, rename into place, rebuild indexes. On Postgres and
 // SQLite the whole sequence runs inside the migration's transaction, so a
-// failure leaves the original table untouched. MySQL refuses to compile a
-// Recreate: its implicit DDL commits would leave a crash window with the
-// live table dropped, and native ALTER TABLE already covers every Recreate
-// use case there. Child tables referencing the recreated one keep working —
-// their foreign keys resolve by name once the rename lands — but with SQLite
-// foreign key enforcement enabled (PRAGMA foreign_keys=ON) and referencing
-// rows present, run the migration on a connection with enforcement off.
+// failure leaves the original table untouched; combining Recreate with
+// WithoutTransaction is refused at compile time for the same reason. MySQL
+// refuses Recreate entirely: its implicit DDL commits would leave a crash
+// window with the live table dropped, and native ALTER TABLE already covers
+// every Recreate use case there.
+//
+// Dependent objects bound the rebuild. On Postgres a table referenced by
+// other tables' foreign keys or by views cannot be dropped, so its Recreate
+// fails cleanly (transaction rolled back, original table intact) — change
+// such tables with native ALTER via Table or Exec instead. On SQLite child
+// foreign keys resolve by name again once the rename lands; with enforcement
+// enabled (PRAGMA foreign_keys=ON) and referencing rows present, run the
+// migration on a connection with enforcement off.
 //
 // Recreate discards the previous definition and is therefore irreversible;
 // rolling back requires WithDown.

@@ -213,3 +213,43 @@ func TestRenameIndexQualified(t *testing.T) {
 		`ALTER INDEX "analytics"."events_kind_index" RENAME TO "events_category_index"`,
 	})
 }
+
+// Codex round 2: Steps(-1) used to fall into the Reset branch, bypassing the
+// baseline protection a plain Rollback promises.
+func TestStepsRejectsNonPositiveCounts(t *testing.T) {
+	f := newFakeDB()
+	c := twoTables()
+	f.setRecords(appliedRecord(t, c, Postgres, "001_users", 0)) // baselined
+	m := testMigrator(t, f, Postgres, c)
+	for _, n := range []int{0, -1, -100} {
+		if err := m.Rollback(context.Background(), Steps(n)); err == nil ||
+			!strings.Contains(err.Error(), "positive count") {
+			t.Fatalf("Steps(%d) must fail, got: %v", n, err)
+		}
+	}
+	if len(f.loggedContaining("DROP TABLE")) != 0 {
+		t.Fatal("nothing may execute for an invalid Steps count")
+	}
+	if _, err := m.PlanRollback(context.Background(), Steps(-1)); err == nil {
+		t.Fatal("PlanRollback must reject invalid Steps too")
+	}
+}
+
+// Codex round 2: WithoutTransaction reopened the crash window on a Recreate
+// that the MySQL gate had closed — statement-by-statement execution can lose
+// the live table between the DROP and the rename.
+func TestRecreateRequiresTransaction(t *testing.T) {
+	f := newFakeDB()
+	c := NewCollection()
+	c.Add("001_rebuild", func(s *Schema) {
+		s.Recreate("users", func(t *Table) { t.ID() })
+	}, WithoutTransaction(), WithDown(func(s *Schema) {}))
+	m := testMigrator(t, f, Postgres, c)
+	err := m.Up(context.Background())
+	if err == nil || !strings.Contains(err.Error(), "requires the migration's transaction") {
+		t.Fatalf("Recreate without a transaction must fail at compile time, got: %v", err)
+	}
+	if len(f.loggedContaining("DROP TABLE")) != 0 {
+		t.Fatal("nothing destructive may execute")
+	}
+}
