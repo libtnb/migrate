@@ -86,18 +86,15 @@ func TestRecreateIdentitySequenceAdvances(t *testing.T) {
 	}
 }
 
-func TestRecreateMySQLUsesRenameTable(t *testing.T) {
-	got := compileSchema(t, MySQL, func(s *Schema) {
-		s.Recreate("t", func(t *Table) { t.ID() })
-	})
-	found := false
-	for _, sql := range got {
-		if sql == "RENAME TABLE `t__migrate_new` TO `t`" {
-			found = true
-		}
-	}
-	if !found {
-		t.Errorf("expected RENAME TABLE statement, got:\n%s", strings.Join(got, "\n"))
+// Codex adversarial review: MySQL's implicit DDL commits leave a crash window
+// between the DROP and the RENAME with the live table gone; native ALTER
+// covers every Recreate use case there, so compiling is refused outright.
+func TestMySQLRefusesRecreate(t *testing.T) {
+	s := &Schema{}
+	s.Recreate("t", func(t *Table) { t.ID() })
+	_, err := MySQL.compile(s.ops[0])
+	if err == nil || !strings.Contains(err.Error(), "ALTER") {
+		t.Fatalf("MySQL must refuse Recreate and point at native ALTER, got: %v", err)
 	}
 }
 

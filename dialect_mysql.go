@@ -45,9 +45,14 @@ func (d mysqlDialect) compile(op operation) ([]statement, error) {
 	case *alterTable:
 		return d.compileAlter(o)
 	case *recreateTable:
-		return compileRecreate(d, myQ, false, func(from, to string) statement {
-			return sqlStatement("RENAME TABLE %s TO %s", myQ.table(from), myQ.table(to))
-		}, o.def)
+		// MySQL commits every DDL statement implicitly, so the copy-drop-
+		// rename sequence cannot be made atomic: a crash between the DROP and
+		// the RENAME leaves the live table gone. An atomic two-way RENAME
+		// swap does not help either — child foreign keys follow the renamed
+		// table to its backup name. MySQL's native ALTER TABLE covers every
+		// Recreate use case (MODIFY COLUMN, constraint changes), so refusing
+		// is strictly safer than a destructive window.
+		return nil, fmt.Errorf("migrate: mysql cannot rebuild table %q atomically (DDL commits implicitly); use Schema.Table with native ALTER operations, or Exec", o.def.name)
 	case *rawSQL:
 		return []statement{{sql: o.sql, args: o.args}}, nil
 	case *goFunc:

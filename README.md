@@ -204,7 +204,11 @@ comments with `t.Comment(...)`.
 What `ALTER TABLE` cannot express — on SQLite, any constraint change —
 `Recreate` can: declare the complete target table and the migrator rebuilds
 it around the data (create temporary → copy rows → drop old → rename →
-rebuild indexes), inside the migration's transaction on Postgres and SQLite:
+rebuild indexes), inside the migration's transaction on Postgres and SQLite,
+so a failure leaves the original table untouched. MySQL refuses to compile a
+`Recreate` — its implicit DDL commits would open a crash window with the live
+table dropped, and its native `ALTER TABLE` already changes types and
+constraints directly:
 
 ```go
 s.Recreate("users", func(t *migrate.Table) {
