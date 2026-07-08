@@ -225,6 +225,13 @@ func (m *Migrator) rollbackTargets(ctx context.Context, conn *sql.Conn, spec rol
 	}
 	// Repeatable migrations have no down and belong to no batch.
 	recs = slices.DeleteFunc(recs, func(r record) bool { return r.batch == repeatableBatch })
+	if spec.steps >= 0 {
+		// Baselined rows (batch 0) were never executed by this tool; only an
+		// explicit Reset rolls them back. Without this, once every real batch
+		// is undone the baseline would become the "latest batch" and a plain
+		// Rollback would drop pre-existing production tables.
+		recs = slices.DeleteFunc(recs, func(r record) bool { return r.batch == 0 })
+	}
 	if len(recs) == 0 {
 		return nil, nil
 	}
@@ -440,7 +447,11 @@ func (m *Migrator) locked(ctx context.Context, fn func(*sql.Conn) error) error {
 			return err
 		}
 		defer func() {
-			if err := m.d.unlock(context.WithoutCancel(ctx), conn, m.cfg.table); err != nil {
+			// Run even after ctx cancellation, but never hang forever: the
+			// session lock dies with the connection anyway.
+			unlockCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 10*time.Second)
+			defer cancel()
+			if err := m.d.unlock(unlockCtx, conn, m.cfg.table); err != nil {
 				m.cfg.logger.Warn("migrate: release lock", "error", err)
 			}
 		}()

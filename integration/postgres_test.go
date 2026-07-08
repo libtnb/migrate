@@ -102,3 +102,68 @@ func TestPostgresFailedMigrationLeavesNoTrace(t *testing.T) {
 }
 
 func TestPostgresRepeatable(t *testing.T) { runRepeatable(t, openPostgres(t), migrate.Postgres) }
+
+// Audit regression: Recreate used to fail on Postgres for any table-level
+// primary key (the temp table claimed the live pkey's backing-index name),
+// and left the identity sequence behind the copied rows.
+func TestPostgresRecreate(t *testing.T) {
+	ctx := context.Background()
+	db := openPostgres(t)
+	dropAll(t, db)
+	if _, err := db.Exec("DROP TABLE IF EXISTS counters"); err != nil {
+		t.Fatal(err)
+	}
+
+	c := migrate.NewCollection()
+	c.Add("001_orders", func(s *migrate.Schema) {
+		s.Create("orders", func(t *migrate.Table) {
+			t.Integer("code").Primary() // table-level named PK: the collision case
+			t.String("state")
+		})
+	})
+	c.Add("002_counters", func(s *migrate.Schema) {
+		s.Create("counters", func(t *migrate.Table) {
+			t.ID() // identity: the sequence case
+			t.String("name")
+		})
+	})
+	m, err := migrate.New(db, migrate.Postgres, migrate.WithCollection(c))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := m.Up(ctx); err != nil {
+		t.Fatalf("Up: %v", err)
+	}
+	mustExec(t, db, "INSERT INTO orders (code, state) VALUES (1, 'open')")
+	mustExec(t, db, "INSERT INTO counters (name) VALUES ('a')")
+	mustExec(t, db, "INSERT INTO counters (name) VALUES ('b')")
+
+	c.Add("003_rebuild", func(s *migrate.Schema) {
+		s.Recreate("orders", func(t *migrate.Table) {
+			t.Integer("code").Primary()
+			t.Enum("state", "open", "closed")
+		})
+		s.Recreate("counters", func(t *migrate.Table) {
+			t.ID()
+			t.String("name").Unique()
+		})
+	}, migrate.WithDown(func(s *migrate.Schema) {}))
+	if err := m.Up(ctx); err != nil {
+		t.Fatalf("Up with recreates: %v", err) // pre-fix: relation "orders_pkey" already exists
+	}
+
+	// The PK carries its conventional name after the swap.
+	if got := count(t, db, `SELECT COUNT(*) FROM pg_constraint WHERE conname = 'orders_pkey'`); got != 1 {
+		t.Errorf("orders_pkey should exist after the rebuild, got %d", got)
+	}
+	if got := count(t, db, `SELECT COUNT(*) FROM pg_constraint WHERE conname LIKE '%__migrate_new%'`); got != 0 {
+		t.Error("no constraint may keep the temporary name")
+	}
+	// The identity sequence advanced past the copied rows: the next insert
+	// must not collide (pre-fix: duplicate key on counters_pkey).
+	mustExec(t, db, "INSERT INTO counters (name) VALUES ('c')")
+	if got := count(t, db, "SELECT MAX(id) FROM counters"); got != 3 {
+		t.Errorf("the new row should take id 3, max = %d", got)
+	}
+	mustExec(t, db, "DROP TABLE IF EXISTS counters")
+}

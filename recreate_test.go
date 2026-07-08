@@ -39,15 +39,50 @@ func TestRecreateConstraintNamesUseFinalTable(t *testing.T) {
 	create := got[0]
 	for _, frag := range []string{
 		`CREATE TABLE "orders__migrate_new"`,
-		`CONSTRAINT "orders_pkey" PRIMARY KEY ("code")`,       // not orders__migrate_new_pkey
+		// The PK stays unnamed here: a named one would create a backing index
+		// colliding with the live table's orders_pkey. It is renamed to the
+		// conventional name after the swap.
+		`PRIMARY KEY ("code")`,
 		`CONSTRAINT "orders_state_check" CHECK ("state" IN (`, // not orders__migrate_new_state_check
 	} {
 		if !strings.Contains(create, frag) {
 			t.Errorf("missing %q in:\n%s", frag, create)
 		}
 	}
-	if strings.Contains(create, "__migrate_new_") {
-		t.Errorf("no constraint may carry the temporary name:\n%s", create)
+	if strings.Contains(create, `CONSTRAINT "orders_pkey"`) {
+		t.Errorf("the temp table must not claim the live pkey name:\n%s", create)
+	}
+	last := got[len(got)-1]
+	if last != `ALTER TABLE "orders" RENAME CONSTRAINT "orders__migrate_new_pkey" TO "orders_pkey"` {
+		t.Errorf("the swap should finish by renaming the PK constraint, got: %s", last)
+	}
+}
+
+func TestRecreateIdentitySequenceAdvances(t *testing.T) {
+	got := compileSchema(t, Postgres, func(s *Schema) {
+		s.Recreate("users", func(t *Table) {
+			t.ID()
+			t.String("email")
+		})
+	})
+	joined := strings.Join(got, "\n")
+	if !strings.Contains(joined, `RENAME CONSTRAINT "users__migrate_new_pkey" TO "users_pkey"`) {
+		t.Errorf("identity PK should be renamed after the swap:\n%s", joined)
+	}
+	want := `SELECT setval(pg_get_serial_sequence('"users"', 'id'), COALESCE((SELECT MAX("id") FROM "users"), 0) + 1, false)`
+	if got[len(got)-1] != want {
+		t.Errorf("the identity sequence must advance past copied rows:\n got: %s\nwant: %s", got[len(got)-1], want)
+	}
+
+	// A skipped-copy identity column keeps its fresh sequence: no setval.
+	got = compileSchema(t, Postgres, func(s *Schema) {
+		s.Recreate("users", func(t *Table) {
+			t.ID().SkipCopy()
+			t.String("email")
+		})
+	})
+	if strings.Contains(strings.Join(got, "\n"), "setval") {
+		t.Error("a SkipCopy identity column needs no sequence bump")
 	}
 }
 

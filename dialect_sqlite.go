@@ -45,6 +45,9 @@ func (d sqliteDialect) compile(op operation) ([]statement, error) {
 		return []statement{dropTableSQL(liteQ, o)}, nil
 	case *renameTable:
 		// RENAME TO takes a bare name: renames stay within the schema.
+		if schemaPrefix(o.from) != schemaPrefix(o.to) {
+			return nil, fmt.Errorf("migrate: sqlite cannot move table %q to %q with Rename; tables stay in their attached database", o.from, o.to)
+		}
 		return []statement{sqlStatement("ALTER TABLE %s RENAME TO %s", liteQ.table(o.from), liteQ.ident(baseName(o.to)))}, nil
 	case *alterTable:
 		return d.compileAlter(o)
@@ -103,6 +106,16 @@ func (d sqliteDialect) compileAlter(op *alterTable) ([]statement, error) {
 			if c.col.autoIncr {
 				return nil, fmt.Errorf("migrate: sqlite cannot add auto-increment column %q to existing table %q; declare it in Create, or use Schema.Recreate", c.col.name, op.table)
 			}
+			if c.col.generatedExpr != "" && !c.col.generatedVirtual {
+				// ALTER TABLE ADD COLUMN ... STORED fails on any populated
+				// table — an error tests on empty databases never see.
+				return nil, fmt.Errorf("migrate: sqlite cannot add STORED generated column %q to existing table %q; use VirtualAs, or Schema.Recreate", c.col.name, op.table)
+			}
+			if c.col.useCurrent || c.col.defaultExpr != "" {
+				// Non-constant defaults are rejected by ADD COLUMN on any
+				// populated table.
+				return nil, fmt.Errorf("migrate: sqlite cannot add column %q with a non-constant default to existing table %q; use a literal Default, or Schema.Recreate", c.col.name, op.table)
+			}
 			clause, err := d.columnSQL(op.table, c.col)
 			if err != nil {
 				return nil, err
@@ -150,6 +163,9 @@ func (d sqliteDialect) columnSQL(table string, c *columnDef) (string, error) {
 	var b strings.Builder
 	b.WriteString(liteQ.ident(c.name) + " " + typ)
 	if c.inlinePrimary() {
+		if c.kind == kindRaw && !strings.EqualFold(strings.TrimSpace(c.rawType), "INTEGER") {
+			return "", fmt.Errorf("migrate: sqlite allows AUTOINCREMENT only on INTEGER columns; column %q declares %q", c.name, c.rawType)
+		}
 		// INTEGER PRIMARY KEY aliases the rowid; AUTOINCREMENT prevents ids
 		// of deleted rows from being reused.
 		b.WriteString(" PRIMARY KEY AUTOINCREMENT")

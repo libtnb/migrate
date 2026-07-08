@@ -321,7 +321,7 @@ objects you did not name). And on databases without `CREATE OR REPLACE`
 | `m.Status(ctx)` | applied / pending / drifted / unregistered, per migration |
 | `m.Plan(ctx)` / `m.PlanRollback(ctx)` | the SQL that would run, without running it |
 | `m.Baseline(ctx)` | mark migrations applied without executing (existing databases) |
-| `m.Repair(ctx)` | re-record checksums after a reviewed change |
+| `m.Repair(ctx)` | re-record versioned checksums after a reviewed change (repeatables stay due) |
 | `m.Fresh(ctx)` | **development only**: drop every table, re-run everything |
 
 Typical wiring runs `Up` at startup — safe with multiple replicas thanks to

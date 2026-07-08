@@ -248,7 +248,9 @@ func (mysqlDialect) typeSQL(c *columnDef) (string, error) {
 const myLockName = "CONCAT('libtnb.migrate.', MD5(CONCAT(IFNULL(DATABASE(), ''), ':', ?)))"
 
 func (mysqlDialect) lock(ctx context.Context, conn *sql.Conn, table string, timeout time.Duration) error {
-	seconds := int64(timeout / time.Second)
+	// GET_LOCK counts whole seconds; round up so a sub-second timeout still
+	// waits instead of degrading to a single non-blocking attempt.
+	seconds := int64((timeout + time.Second - 1) / time.Second)
 	var acquired sql.NullInt64
 	err := conn.QueryRowContext(ctx, "SELECT GET_LOCK("+myLockName+", ?)", table, seconds).Scan(&acquired)
 	if err != nil {

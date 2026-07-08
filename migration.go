@@ -109,6 +109,21 @@ func validateSchema(name string, s *Schema) error {
 			if c.copyFrom != "" && c.skipCopy {
 				errs = append(errs, fmt.Errorf("column %q of table %q declares both CopyFrom and SkipCopy", c.name, table))
 			}
+			if c.primary && c.nullable {
+				// SQLite would honour the contradiction and accept NULL keys.
+				errs = append(errs, fmt.Errorf("primary key column %q of table %q cannot be nullable", c.name, table))
+			}
+		}
+	}
+	checkTablePK := func(def *tableDef) {
+		nullable := make(map[string]bool, len(def.columns))
+		for _, c := range def.columns {
+			nullable[c.name] = c.nullable
+		}
+		for _, p := range def.primary {
+			if nullable[p] {
+				errs = append(errs, fmt.Errorf("primary key column %q of table %q cannot be nullable", p, def.name))
+			}
 		}
 	}
 	for _, op := range s.ops {
@@ -116,9 +131,11 @@ func validateSchema(name string, s *Schema) error {
 		case *createTable:
 			errs = append(errs, o.def.errs...)
 			check(o.def.name, o.def.columns)
+			checkTablePK(o.def)
 		case *recreateTable:
 			errs = append(errs, o.def.errs...)
 			check(o.def.name, o.def.columns)
+			checkTablePK(o.def)
 		case *alterTable:
 			errs = append(errs, o.errs...)
 			for _, ch := range o.changes {

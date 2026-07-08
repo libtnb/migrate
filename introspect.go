@@ -319,9 +319,11 @@ func (m *Migrator) listTables(ctx context.Context, db DB) ([]string, error) {
 	return tables, nil
 }
 
-// Repair re-records the checksum of every applied migration to its current
-// value, accepting drift after a reviewed change — most commonly an upgrade
-// of this package that renders SQL differently.
+// Repair re-records the checksum of every applied versioned migration to its
+// current value, accepting drift after a reviewed change — most commonly an
+// upgrade of this package that renders SQL differently. Repeatable records
+// are left alone: for those a changed checksum means a pending re-run, and
+// rewriting it would silently cancel that re-run.
 func (m *Migrator) Repair(ctx context.Context) error {
 	return m.locked(ctx, func(conn *sql.Conn) error {
 		recs, err := m.loadState(ctx, conn)
@@ -331,6 +333,9 @@ func (m *Migrator) Repair(ctx context.Context) error {
 		table := m.d.quoteIdent(m.cfg.table)
 		count := 0
 		for _, r := range recs {
+			if r.batch == repeatableBatch {
+				continue
+			}
 			mig := m.cfg.collection.get(r.version)
 			if mig == nil {
 				continue

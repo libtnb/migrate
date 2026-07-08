@@ -37,13 +37,20 @@ func (d postgresDialect) compile(op operation) ([]statement, error) {
 		return []statement{dropTableSQL(pgQ, o)}, nil
 	case *renameTable:
 		// RENAME TO takes a bare name: renames stay within the schema.
+		if schemaPrefix(o.from) != schemaPrefix(o.to) {
+			return nil, fmt.Errorf("migrate: postgres cannot move table %q to %q with Rename; use Exec with ALTER TABLE ... SET SCHEMA", o.from, o.to)
+		}
 		return []statement{sqlStatement("ALTER TABLE %s RENAME TO %s", pgQ.table(o.from), pgQ.ident(baseName(o.to)))}, nil
 	case *alterTable:
 		return d.compileAlter(o)
 	case *recreateTable:
-		return compileRecreate(d, pgQ, false, func(from, to string) statement {
+		stmts, err := compileRecreate(d, pgQ, false, func(from, to string) statement {
 			return sqlStatement("ALTER TABLE %s RENAME TO %s", pgQ.table(from), pgQ.ident(baseName(to)))
 		}, o.def)
+		if err != nil {
+			return nil, err
+		}
+		return append(stmts, d.recreateEpilogue(o.def)...), nil
 	case *rawSQL:
 		return []statement{{sql: o.sql, args: o.args}}, nil
 	case *goFunc:
@@ -72,8 +79,16 @@ func (d postgresDialect) compileCreate(def *tableDef) ([]statement, error) {
 		}
 	}
 	if len(pk) > 0 {
-		clauses = append(clauses, fmt.Sprintf("CONSTRAINT %s PRIMARY KEY (%s)",
-			pgQ.ident(primaryName(def.constraintTable())), pgQ.idents(pk)))
+		if def.constraintBase != "" {
+			// Recreate's temporary table: a named PK would create a backing
+			// index colliding with the live table's (index names share the
+			// schema namespace). Leave it unnamed — Postgres names it after
+			// the temporary table — and rename it after the table swap.
+			clauses = append(clauses, fmt.Sprintf("PRIMARY KEY (%s)", pgQ.idents(pk)))
+		} else {
+			clauses = append(clauses, fmt.Sprintf("CONSTRAINT %s PRIMARY KEY (%s)",
+				pgQ.ident(primaryName(def.name)), pgQ.idents(pk)))
+		}
 	}
 	for _, chk := range def.checks {
 		clauses = append(clauses, checkClause(pgQ, chk))
@@ -130,7 +145,9 @@ func (d postgresDialect) compileAlter(op *alterTable) ([]statement, error) {
 		case *dropPrimary:
 			stmts = append(stmts, sqlStatement("ALTER TABLE %s DROP CONSTRAINT %s", table, pgQ.ident(primaryName(op.table))))
 		case *renameIndex:
-			stmts = append(stmts, sqlStatement("ALTER INDEX %s RENAME TO %s", pgQ.ident(c.from), pgQ.ident(c.to)))
+			// The index lives in the table's schema; the new name stays bare.
+			stmts = append(stmts, sqlStatement("ALTER INDEX %s RENAME TO %s",
+				pgQ.table(schemaPrefix(op.table)+c.from), pgQ.ident(c.to)))
 		case *setTableComment:
 			stmts = append(stmts, d.tableCommentSQL(op.table, c.comment))
 		case *addCheck:
@@ -222,6 +239,38 @@ func (postgresDialect) typeSQL(c *columnDef) (string, error) {
 func (postgresDialect) commentSQL(table string, c *columnDef) statement {
 	comment := strings.ReplaceAll(c.comment, "'", "''")
 	return sqlStatement("COMMENT ON COLUMN %s.%s IS '%s'", pgQ.table(table), pgQ.ident(c.name), comment)
+}
+
+// recreateEpilogue finishes a table swap: the rebuilt primary key kept the
+// temporary table's auto-generated constraint name, and a copied identity
+// column still has its sequence at the start.
+func (d postgresDialect) recreateEpilogue(def *tableDef) []statement {
+	var stmts []statement
+	pk, err := primaryColumns(def)
+	hasInline := false
+	for _, c := range def.columns {
+		if c.inlinePrimary() {
+			hasInline = true
+		}
+	}
+	if err == nil && (len(pk) > 0 || hasInline) {
+		tmpPkey := baseName(def.name) + "__migrate_new_pkey"
+		stmts = append(stmts, sqlStatement("ALTER TABLE %s RENAME CONSTRAINT %s TO %s",
+			pgQ.table(def.name), pgQ.ident(tmpPkey), pgQ.ident(primaryName(def.name))))
+	}
+	for _, c := range def.columns {
+		if !c.inlinePrimary() || c.skipCopy {
+			continue
+		}
+		// Explicit-id inserts do not advance an identity sequence; without
+		// this the next application insert would collide with copied rows.
+		table := strings.ReplaceAll(pgQ.table(def.name), "'", "''")
+		column := strings.ReplaceAll(c.name, "'", "''")
+		stmts = append(stmts, sqlStatement(
+			"SELECT setval(pg_get_serial_sequence('%s', '%s'), COALESCE((SELECT MAX(%s) FROM %s), 0) + 1, false)",
+			table, column, pgQ.ident(c.name), pgQ.table(def.name)))
+	}
+	return stmts
 }
 
 // Advisory locking: the lock key is derived inside Postgres itself from the
