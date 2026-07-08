@@ -80,3 +80,37 @@ func TestQualifiedRecordsTable(t *testing.T) {
 		t.Error("bookkeeping should target the qualified records table")
 	}
 }
+
+// Audit: cross-schema renames silently stayed in the source schema on
+// Postgres and SQLite while MySQL moved the table.
+func TestCrossSchemaRenameRefused(t *testing.T) {
+	s := &Schema{}
+	s.Rename("public.orders", "archive.orders")
+	if _, err := Postgres.compile(s.ops[0]); err == nil || !strings.Contains(err.Error(), "SET SCHEMA") {
+		t.Fatalf("postgres must refuse cross-schema renames, got: %v", err)
+	}
+	if _, err := SQLite.compile(s.ops[0]); err == nil {
+		t.Fatal("sqlite must refuse cross-schema rename")
+	}
+	if _, err := MySQL.compile(s.ops[0]); err != nil {
+		t.Fatalf("mysql legitimately moves tables across databases: %v", err)
+	}
+	// Same-schema qualified renames keep working.
+	s = &Schema{}
+	s.Rename("analytics.a", "analytics.b")
+	if _, err := Postgres.compile(s.ops[0]); err != nil {
+		t.Fatalf("same-schema rename: %v", err)
+	}
+}
+
+// Audit: RenameIndex ignored the table's schema on Postgres.
+func TestRenameIndexQualified(t *testing.T) {
+	got := compileSchema(t, Postgres, func(s *Schema) {
+		s.Table("analytics.events", func(t *Table) {
+			t.RenameIndex("events_kind_index", "events_category_index")
+		})
+	})
+	assertSQL(t, got, []string{
+		`ALTER INDEX "analytics"."events_kind_index" RENAME TO "events_category_index"`,
+	})
+}

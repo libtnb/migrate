@@ -438,3 +438,57 @@ func TestIdentifierQuoting(t *testing.T) {
 		t.Errorf("mysql ident = %s", got)
 	}
 }
+
+// Audit: SQLite ADD COLUMN restrictions that only bite on populated tables
+// must fail at compile time.
+func TestSQLiteAlterAddColumnGuards(t *testing.T) {
+	cases := map[string]struct {
+		declare func(*Table)
+		want    string
+	}{
+		"stored generated": {
+			func(t *Table) { t.String("summary").StoredAs("substr(body,1,100)") },
+			"STORED generated column",
+		},
+		"use current": {
+			func(t *Table) { t.TimestampTz("seen").Nullable().UseCurrent() },
+			"non-constant default",
+		},
+		"default expr": {
+			func(t *Table) { t.UUID("token").Nullable().DefaultExpr("hex(randomblob(16))") },
+			"non-constant default",
+		},
+	}
+	for name, tc := range cases {
+		t.Run(name, func(t *testing.T) {
+			s := &Schema{}
+			s.Table("events", tc.declare)
+			_, err := SQLite.compile(s.ops[0])
+			if err == nil || !strings.Contains(err.Error(), tc.want) {
+				t.Fatalf("expected compile error mentioning %q, got: %v", tc.want, err)
+			}
+		})
+	}
+	// Virtual generated columns remain addable.
+	s := &Schema{}
+	s.Table("events", func(t *Table) {
+		t.String("kind", 32).VirtualAs("json_extract(meta,'$.kind')").Nullable()
+	})
+	if _, err := SQLite.compile(s.ops[0]); err != nil {
+		t.Fatalf("VIRTUAL generated columns are addable on SQLite: %v", err)
+	}
+}
+
+// Audit: raw-typed auto-increment must be INTEGER on SQLite.
+func TestSQLiteRawAutoIncrementRequiresInteger(t *testing.T) {
+	s := &Schema{}
+	s.Create("t", func(tb *Table) { tb.Column("id", "BIGINT").AutoIncrement() })
+	if _, err := SQLite.compile(s.ops[0]); err == nil || !strings.Contains(err.Error(), "INTEGER") {
+		t.Fatalf("BIGINT AUTOINCREMENT must fail at compile time, got: %v", err)
+	}
+	s = &Schema{}
+	s.Create("t", func(tb *Table) { tb.Column("id", "integer").AutoIncrement() })
+	if _, err := SQLite.compile(s.ops[0]); err != nil {
+		t.Fatalf("a raw integer type (any case) is fine: %v", err)
+	}
+}

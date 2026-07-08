@@ -223,3 +223,31 @@ func TestCollectionSQLIncludesRepeatables(t *testing.T) {
 		t.Fatalf("SQL should render versioned then repeatable, got %+v", plans)
 	}
 }
+
+// Audit: Repair used to rewrite a drifted repeatable's checksum, silently
+// cancelling its pending re-run.
+func TestRepairLeavesRepeatablesDue(t *testing.T) {
+	f := newFakeDB()
+	old := viewCollection("active")
+	edited := viewCollection("active AND verified")
+	f.setRecords(
+		appliedRecord(t, edited, Postgres, "001_users", 1),
+		repeatableRecord(t, old, "active_users_view"), // stale: due a re-run
+	)
+	m := testMigrator(t, f, Postgres, edited)
+	if err := m.Repair(context.Background()); err != nil {
+		t.Fatalf("Repair: %v", err)
+	}
+	if len(f.loggedContaining("UPDATE \"schema_migrations\" SET checksum")) != 0 {
+		t.Fatal("Repair must not rewrite repeatable checksums")
+	}
+	// The re-run stays due.
+	recs := []record{repeatableRecord(t, old, "active_users_view")}
+	due, _, err := m.dueRepeatables(recs)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(due) != 1 {
+		t.Fatal("the edited repeatable must still be due after Repair")
+	}
+}

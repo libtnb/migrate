@@ -554,3 +554,106 @@ func TestFreshDropsEverythingThenMigrates(t *testing.T) {
 		"INSERT INTO",
 	})
 }
+
+// Audit: a plain Rollback used to select batch-0 baseline rows once they
+// became the highest remaining batch, dropping pre-existing production
+// tables.
+func TestRollbackNeverTouchesBaselinedRows(t *testing.T) {
+	f := newFakeDB()
+	c := twoTables()
+	base := appliedRecord(t, c, Postgres, "001_users", 0) // baselined
+	real := appliedRecord(t, c, Postgres, "002_posts", 1)
+	f.setRecords(base, real)
+	m := testMigrator(t, f, Postgres, c)
+
+	// First rollback undoes the real batch.
+	if err := m.RollbackBatch(context.Background()); err != nil {
+		t.Fatalf("Rollback: %v", err)
+	}
+	if len(f.loggedContaining(`DROP TABLE "posts"`)) != 1 {
+		t.Error("the real migration should roll back")
+	}
+	// Second rollback finds only the baseline left — and must not touch it.
+	f.setRecords(base)
+	if err := m.RollbackBatch(context.Background()); err != nil {
+		t.Fatalf("second Rollback: %v", err)
+	}
+	if len(f.loggedContaining(`DROP TABLE "users"`)) != 0 {
+		t.Fatal("a plain Rollback must never drop baselined tables")
+	}
+	if err := m.Rollback(context.Background(), 5); err != nil {
+		t.Fatalf("steps rollback: %v", err)
+	}
+	if len(f.loggedContaining(`DROP TABLE "users"`)) != 0 {
+		t.Fatal("a step rollback must never drop baselined tables either")
+	}
+
+	// Reset is the documented exception.
+	if err := m.Reset(context.Background()); err != nil {
+		t.Fatalf("Reset: %v", err)
+	}
+	if len(f.loggedContaining(`DROP TABLE "users"`)) != 1 {
+		t.Error("Reset still rolls baselined rows back, as documented")
+	}
+}
+
+// Codex round 2 (API reshaped in v0.4): a non-positive step count must fail
+// before anything loads — negative values used to alias Reset internally and
+// bypass the baseline protection.
+func TestRollbackRejectsNonPositiveSteps(t *testing.T) {
+	f := newFakeDB()
+	c := twoTables()
+	f.setRecords(appliedRecord(t, c, Postgres, "001_users", 0)) // baselined
+	m := testMigrator(t, f, Postgres, c)
+	for _, n := range []int{0, -1, -100} {
+		if err := m.Rollback(context.Background(), n); err == nil ||
+			!strings.Contains(err.Error(), "positive step count") {
+			t.Fatalf("Rollback(ctx, %d) must fail, got: %v", n, err)
+		}
+	}
+	if len(f.loggedContaining("DROP TABLE")) != 0 {
+		t.Fatal("nothing may execute for an invalid step count")
+	}
+	if _, err := m.PlanRollback(context.Background(), -1); err == nil {
+		t.Fatal("PlanRollback must reject invalid steps too")
+	}
+}
+
+// Audit: sub-second MySQL lock timeouts truncated to GET_LOCK(..., 0),
+// silently disabling the wait.
+func TestMySQLLockTimeoutRoundsUp(t *testing.T) {
+	for timeout, want := range map[time.Duration]int64{
+		500 * time.Millisecond:  1,
+		time.Second:             1,
+		1500 * time.Millisecond: 2,
+		time.Minute:             60,
+	} {
+		if got := int64((timeout + time.Second - 1) / time.Second); got != want {
+			t.Errorf("GET_LOCK seconds for %v = %d, want %d", timeout, got, want)
+		}
+	}
+	// And the full path still works with a sub-second timeout configured.
+	f := newFakeDB()
+	m := testMigrator(t, f, MySQL, twoTables(), WithLockTimeout(500*time.Millisecond))
+	if err := m.Up(context.Background()); err != nil {
+		t.Fatalf("Up: %v", err)
+	}
+}
+
+// Self-review round 4: combination gaps found by walking the option matrix.
+func TestBaselineValidation(t *testing.T) {
+	f := newFakeDB()
+	c := viewCollection("active") // one versioned + one repeatable
+	m := testMigrator(t, f, Postgres, c)
+
+	if err := m.Baseline(context.Background(), "a", "b"); err == nil {
+		t.Fatal("extra variadic arguments must not be silently ignored")
+	}
+	if err := m.Baseline(context.Background(), "active_users_view"); err == nil ||
+		!strings.Contains(err.Error(), "repeatable") {
+		t.Fatalf("a repeatable name is not a valid versioned bound, got: %v", err)
+	}
+	if err := m.Baseline(context.Background(), "001_users"); err != nil {
+		t.Fatalf("a versioned bound works: %v", err)
+	}
+}

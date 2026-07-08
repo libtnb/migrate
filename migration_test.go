@@ -215,3 +215,41 @@ func TestGuessParentTable(t *testing.T) {
 		}
 	}
 }
+
+// Audit: Primary combined with Nullable silently produced a NULL-accepting
+// primary key on SQLite.
+func TestPrimaryNullableIsRejected(t *testing.T) {
+	cases := map[string]func(*Schema){
+		"column primary": func(s *Schema) {
+			s.Create("t", func(tb *Table) { tb.String("code").Primary().Nullable() })
+		},
+		"composite primary": func(s *Schema) {
+			s.Create("t", func(tb *Table) {
+				tb.Integer("a").Nullable()
+				tb.Integer("b")
+				tb.Primary("a", "b")
+			})
+		},
+	}
+	for name, up := range cases {
+		t.Run(name, func(t *testing.T) {
+			m := migrationOf(t, up)
+			if _, err := m.upOps(); err == nil {
+				t.Fatal("expected a declaration error")
+			}
+		})
+	}
+}
+
+func TestDuplicateColumnDeclarationRejected(t *testing.T) {
+	m := migrationOf(t, func(s *Schema) {
+		s.Create("t", func(tb *Table) {
+			tb.ID()
+			tb.String("email")
+			tb.String("email")
+		})
+	})
+	if _, err := m.upOps(); err == nil || !strings.Contains(err.Error(), "twice") {
+		t.Fatalf("duplicate columns must be a declaration error, got: %v", err)
+	}
+}

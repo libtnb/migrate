@@ -1,6 +1,7 @@
 package migrate
 
 import (
+	"context"
 	"errors"
 	"strings"
 	"testing"
@@ -131,5 +132,24 @@ func TestRecreateSafetyFinding(t *testing.T) {
 	findings := analyzeSafety("sqlite", s.ops)
 	if len(findings) != 1 || !strings.Contains(findings[0], "copies every row") {
 		t.Fatalf("expected a recreate finding, got %v", findings)
+	}
+}
+
+// Codex round 2: WithoutTransaction reopened the crash window on a Recreate
+// that the MySQL gate had closed — statement-by-statement execution can lose
+// the live table between the DROP and the rename.
+func TestRecreateRequiresTransaction(t *testing.T) {
+	f := newFakeDB()
+	c := NewCollection()
+	c.Add("001_rebuild", func(s *Schema) {
+		s.Recreate("users", func(t *Table) { t.ID() })
+	}, WithoutTransaction(), WithDown(func(s *Schema) {}))
+	m := testMigrator(t, f, Postgres, c)
+	err := m.Up(context.Background())
+	if err == nil || !strings.Contains(err.Error(), "requires the migration's transaction") {
+		t.Fatalf("Recreate without a transaction must fail at compile time, got: %v", err)
+	}
+	if len(f.loggedContaining("DROP TABLE")) != 0 {
+		t.Fatal("nothing destructive may execute")
 	}
 }
