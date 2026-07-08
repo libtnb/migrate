@@ -260,3 +260,98 @@ func TestSQLiteFresh(t *testing.T) {
 		t.Errorf("all migrations should be re-recorded, got %d", got)
 	}
 }
+
+// Schema-qualified names work end to end against an attached database.
+func TestSQLiteQualifiedNames(t *testing.T) {
+	ctx := context.Background()
+	dir := t.TempDir()
+	db, err := sql.Open("sqlite",
+		"file:"+filepath.Join(dir, "main.db")+"?_pragma=foreign_keys(1)")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = db.Close() })
+	// A single connection so the ATTACH survives for the whole test.
+	db.SetMaxOpenConns(1)
+	if _, err := db.Exec("ATTACH DATABASE '" + filepath.Join(dir, "aux.db") + "' AS aux"); err != nil {
+		t.Fatalf("attach: %v", err)
+	}
+
+	c := migrate.NewCollection()
+	c.Add("001_aux_items", func(s *migrate.Schema) {
+		s.Create("aux.items", func(t *migrate.Table) {
+			t.ID()
+			t.String("name").Unique()
+		})
+	})
+	m, err := migrate.New(db, migrate.SQLite, migrate.WithCollection(c))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := m.Up(ctx); err != nil {
+		t.Fatalf("Up: %v", err)
+	}
+	mustExec(t, db, "INSERT INTO aux.items (name) VALUES ('x')")
+	if _, err := db.Exec("INSERT INTO aux.items (name) VALUES ('x')"); err == nil {
+		t.Error("the unique index should exist in the attached schema")
+	}
+	if err := m.Rollback(ctx); err != nil {
+		t.Fatalf("Rollback: %v", err)
+	}
+	if got := count(t, db, "SELECT COUNT(*) FROM sqlite_master WHERE name = 'items'"); got != 0 {
+		t.Error("the main schema must stay untouched")
+	}
+}
+
+// Generated columns compute, checks enforce, and CopyFrom converts data
+// through a Recreate — the full v0.3 surface against a real database.
+func TestSQLiteGeneratedChecksAndCopyFrom(t *testing.T) {
+	ctx := context.Background()
+	db := openSQLite(t)
+
+	c := migrate.NewCollection()
+	c.Add("001_people", func(s *migrate.Schema) {
+		s.Create("people", func(t *migrate.Table) {
+			t.ID()
+			t.String("first")
+			t.String("last")
+			t.String("full").StoredAs("first || ' ' || last")
+			t.String("age") // stringly typed on purpose; fixed below
+			t.Check("people_first_nonempty", "length(first) > 0")
+		})
+	})
+	m, err := migrate.New(db, migrate.SQLite, migrate.WithCollection(c))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := m.Up(ctx); err != nil {
+		t.Fatalf("Up: %v", err)
+	}
+	mustExec(t, db, `INSERT INTO people (first, last, age) VALUES ('Ada', 'Lovelace', '36')`)
+	if got := count(t, db, `SELECT COUNT(*) FROM people WHERE full = 'Ada Lovelace'`); got != 1 {
+		t.Error("the stored generated column should compute")
+	}
+	if _, err := db.Exec(`INSERT INTO people (first, last, age) VALUES ('', 'X', '1')`); err == nil {
+		t.Error("the check constraint should reject empty first names")
+	}
+
+	c.Add("002_age_integer", func(s *migrate.Schema) {
+		s.Recreate("people", func(t *migrate.Table) {
+			t.ID()
+			t.String("first")
+			t.String("last")
+			t.String("full").StoredAs("first || ' ' || last")
+			t.Integer("age").CopyFrom("CAST(age AS INTEGER)")
+			t.Check("people_first_nonempty", "length(first) > 0")
+		})
+	}, migrate.WithDown(func(s *migrate.Schema) {}))
+	if err := m.Up(ctx); err != nil {
+		t.Fatalf("Up with recreate: %v", err)
+	}
+	if got := count(t, db, `SELECT age + 1 FROM people WHERE first = 'Ada'`); got != 37 {
+		t.Errorf("age should be a real integer after CopyFrom cast, got %d", got)
+	}
+	if got := count(t, db, `SELECT COUNT(*) FROM people WHERE full = 'Ada Lovelace'`); got != 1 {
+		t.Error("the generated column should recompute after the rebuild")
+	}
+}

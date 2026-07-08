@@ -93,16 +93,21 @@ func validateSchema(name string, s *Schema) error {
 	errs := append([]error(nil), s.errs...)
 	check := func(table string, cols []*columnDef) {
 		for _, c := range cols {
-			if !c.autoIncr {
-				continue
+			if c.autoIncr {
+				switch {
+				case !c.integerKind() && c.kind != kindRaw:
+					errs = append(errs, fmt.Errorf("auto-increment column %q of table %q must be an integer", c.name, table))
+				case c.hasDefault:
+					errs = append(errs, fmt.Errorf("auto-increment column %q of table %q cannot have a default value", c.name, table))
+				case c.nullable:
+					errs = append(errs, fmt.Errorf("auto-increment column %q of table %q cannot be nullable", c.name, table))
+				}
 			}
-			switch {
-			case !c.integerKind() && c.kind != kindRaw:
-				errs = append(errs, fmt.Errorf("auto-increment column %q of table %q must be an integer", c.name, table))
-			case c.hasDefault:
-				errs = append(errs, fmt.Errorf("auto-increment column %q of table %q cannot have a default value", c.name, table))
-			case c.nullable:
-				errs = append(errs, fmt.Errorf("auto-increment column %q of table %q cannot be nullable", c.name, table))
+			if c.generatedExpr != "" && (c.hasDefault || c.useCurrent || c.autoIncr) {
+				errs = append(errs, fmt.Errorf("generated column %q of table %q cannot combine with defaults or auto-increment", c.name, table))
+			}
+			if c.copyFrom != "" && c.skipCopy {
+				errs = append(errs, fmt.Errorf("column %q of table %q declares both CopyFrom and SkipCopy", c.name, table))
 			}
 		}
 	}

@@ -74,7 +74,11 @@ type columnDef struct {
 	after   string
 	first   bool
 
-	skipCopy bool // Recreate: no matching column in the old table
+	generatedExpr    string // GENERATED ALWAYS AS (expr)
+	generatedVirtual bool   // VIRTUAL instead of STORED
+
+	skipCopy bool   // Recreate: no matching column in the old table
+	copyFrom string // Recreate: SELECT expression replacing the by-name copy
 }
 
 // integerKind reports whether the column type can auto-increment.
@@ -100,6 +104,11 @@ type indexDef struct {
 	unique  bool
 }
 
+type checkDef struct {
+	name string
+	expr string
+}
+
 type foreignDef struct {
 	name       string // empty means the conventional name
 	columns    []string
@@ -114,6 +123,7 @@ type tableDef struct {
 	name    string
 	columns []*columnDef
 	indexes []*indexDef
+	checks  []*checkDef
 	fks     []*foreignDef
 	primary []string // composite primary key columns
 	comment string
@@ -133,22 +143,24 @@ func (d *tableDef) constraintTable() string {
 }
 
 // Conventional constraint names, shared by every dialect so that dropping by
-// columns can reconstruct the name that adding by columns produced.
+// columns can reconstruct the name that adding by columns produced. They
+// build on the unqualified table name: constraints already live inside the
+// table's schema.
 
 func indexName(table string, columns []string, unique bool) string {
 	suffix := "index"
 	if unique {
 		suffix = "unique"
 	}
-	return table + "_" + strings.Join(columns, "_") + "_" + suffix
+	return baseName(table) + "_" + strings.Join(columns, "_") + "_" + suffix
 }
 
 func foreignName(table string, columns []string) string {
-	return table + "_" + strings.Join(columns, "_") + "_foreign"
+	return baseName(table) + "_" + strings.Join(columns, "_") + "_foreign"
 }
 
 func primaryName(table string) string {
-	return table + "_pkey"
+	return baseName(table) + "_pkey"
 }
 
 func (i *indexDef) resolvedName(table string) string {
@@ -319,6 +331,22 @@ type dropPrimary struct{}
 
 func (c *dropPrimary) inverseChange(table string) ([]change, error) {
 	return nil, irreversible("dropping the primary key of table %q discards its definition", table)
+}
+
+type addCheck struct {
+	chk *checkDef
+}
+
+func (c *addCheck) inverseChange(string) ([]change, error) {
+	return []change{&dropCheck{name: c.chk.name}}, nil
+}
+
+type dropCheck struct {
+	name string
+}
+
+func (c *dropCheck) inverseChange(table string) ([]change, error) {
+	return nil, irreversible("dropping check constraint %q of table %q discards its expression", c.name, table)
 }
 
 type renameIndex struct {

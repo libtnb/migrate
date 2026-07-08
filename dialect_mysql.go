@@ -31,7 +31,7 @@ func (mysqlDialect) ensureTableSQL(table string) string {
 		"\tbatch INTEGER NOT NULL,\n"+
 		"\tchecksum CHAR(64) NOT NULL,\n"+
 		"\tapplied_at VARCHAR(32) NOT NULL\n"+
-		")", myQ.ident(table))
+		")", myQ.table(table))
 }
 
 func (d mysqlDialect) compile(op operation) ([]statement, error) {
@@ -41,12 +41,12 @@ func (d mysqlDialect) compile(op operation) ([]statement, error) {
 	case *dropTable:
 		return []statement{dropTableSQL(myQ, o)}, nil
 	case *renameTable:
-		return []statement{sqlStatement("RENAME TABLE %s TO %s", myQ.ident(o.from), myQ.ident(o.to))}, nil
+		return []statement{sqlStatement("RENAME TABLE %s TO %s", myQ.table(o.from), myQ.table(o.to))}, nil
 	case *alterTable:
 		return d.compileAlter(o)
 	case *recreateTable:
-		return compileRecreate(d, myQ, func(from, to string) statement {
-			return sqlStatement("RENAME TABLE %s TO %s", myQ.ident(from), myQ.ident(to))
+		return compileRecreate(d, myQ, false, func(from, to string) statement {
+			return sqlStatement("RENAME TABLE %s TO %s", myQ.table(from), myQ.table(to))
 		}, o.def)
 	case *rawSQL:
 		return []statement{{sql: o.sql, args: o.args}}, nil
@@ -76,6 +76,9 @@ func (d mysqlDialect) compileCreate(def *tableDef) ([]statement, error) {
 		// accepted and discarded.
 		clauses = append(clauses, fmt.Sprintf("PRIMARY KEY (%s)", myQ.idents(pk)))
 	}
+	for _, chk := range def.checks {
+		clauses = append(clauses, checkClause(myQ, chk))
+	}
 	for _, fk := range def.fks {
 		clauses = append(clauses, foreignClause(myQ, def.constraintTable(), fk))
 	}
@@ -85,15 +88,15 @@ func (d mysqlDialect) compileCreate(def *tableDef) ([]statement, error) {
 		suffix = " COMMENT = '" + mysqlEscape(def.comment) + "'"
 	}
 	stmts := []statement{sqlStatement("CREATE TABLE %s (\n\t%s\n)%s",
-		myQ.ident(def.name), strings.Join(clauses, ",\n\t"), suffix)}
+		myQ.table(def.name), strings.Join(clauses, ",\n\t"), suffix)}
 	for _, idx := range append(inlineIndexes(def.columns), def.indexes...) {
-		stmts = append(stmts, statement{sql: createIndexSQL(myQ, def.name, idx)})
+		stmts = append(stmts, statement{sql: createIndexSQL(myQ, def.name, idx, false)})
 	}
 	return stmts, nil
 }
 
 func (d mysqlDialect) compileAlter(op *alterTable) ([]statement, error) {
-	table := myQ.ident(op.table)
+	table := myQ.table(op.table)
 	var stmts []statement
 	for _, ch := range op.changes {
 		switch c := ch.(type) {
@@ -104,14 +107,14 @@ func (d mysqlDialect) compileAlter(op *alterTable) ([]statement, error) {
 			}
 			stmts = append(stmts, sqlStatement("ALTER TABLE %s ADD COLUMN %s", table, clause))
 			for _, idx := range inlineIndexes([]*columnDef{c.col}) {
-				stmts = append(stmts, statement{sql: createIndexSQL(myQ, op.table, idx)})
+				stmts = append(stmts, statement{sql: createIndexSQL(myQ, op.table, idx, false)})
 			}
 		case *dropColumn:
 			stmts = append(stmts, sqlStatement("ALTER TABLE %s DROP COLUMN %s", table, myQ.ident(c.name)))
 		case *renameColumn:
 			stmts = append(stmts, sqlStatement("ALTER TABLE %s RENAME COLUMN %s TO %s", table, myQ.ident(c.from), myQ.ident(c.to)))
 		case *addIndex:
-			stmts = append(stmts, statement{sql: createIndexSQL(myQ, op.table, c.idx)})
+			stmts = append(stmts, statement{sql: createIndexSQL(myQ, op.table, c.idx, false)})
 		case *dropIndex:
 			stmts = append(stmts, sqlStatement("ALTER TABLE %s DROP INDEX %s", table, myQ.ident(c.name)))
 		case *addForeign:
@@ -126,6 +129,10 @@ func (d mysqlDialect) compileAlter(op *alterTable) ([]statement, error) {
 			stmts = append(stmts, sqlStatement("ALTER TABLE %s RENAME INDEX %s TO %s", table, myQ.ident(c.from), myQ.ident(c.to)))
 		case *setTableComment:
 			stmts = append(stmts, sqlStatement("ALTER TABLE %s COMMENT = '%s'", table, mysqlEscape(c.comment)))
+		case *addCheck:
+			stmts = append(stmts, sqlStatement("ALTER TABLE %s ADD %s", table, checkClause(myQ, c.chk)))
+		case *dropCheck:
+			stmts = append(stmts, sqlStatement("ALTER TABLE %s DROP CHECK %s", table, myQ.ident(c.name)))
 		default:
 			return nil, fmt.Errorf("migrate: mysql: unsupported change %T", ch)
 		}
@@ -143,6 +150,7 @@ func (d mysqlDialect) columnSQL(c *columnDef, altering bool) (string, error) {
 	}
 	var b strings.Builder
 	b.WriteString(myQ.ident(c.name) + " " + typ)
+	b.WriteString(generatedClause(c))
 	if !c.nullable {
 		b.WriteString(" NOT NULL")
 	}
@@ -264,7 +272,7 @@ func (mysqlDialect) unlock(ctx context.Context, conn *sql.Conn, table string) er
 	return nil
 }
 
-func (mysqlDialect) quoteIdent(name string) string { return myQ.ident(name) }
+func (mysqlDialect) quoteIdent(name string) string { return myQ.table(name) }
 
 // mysqlEscape escapes a string for a single-quoted MySQL literal, where
 // backslash is an escape character unless NO_BACKSLASH_ESCAPES is set.
@@ -277,5 +285,5 @@ func (mysqlDialect) listTablesSQL() string {
 }
 
 func (mysqlDialect) freshDropSQL(table string) string {
-	return fmt.Sprintf("DROP TABLE IF EXISTS %s", myQ.ident(table))
+	return fmt.Sprintf("DROP TABLE IF EXISTS %s", myQ.table(table))
 }

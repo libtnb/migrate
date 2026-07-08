@@ -34,7 +34,7 @@ func (sqliteDialect) ensureTableSQL(table string) string {
 	batch INTEGER NOT NULL,
 	checksum TEXT NOT NULL,
 	applied_at TEXT NOT NULL
-)`, liteQ.ident(table))
+)`, liteQ.table(table))
 }
 
 func (d sqliteDialect) compile(op operation) ([]statement, error) {
@@ -44,12 +44,13 @@ func (d sqliteDialect) compile(op operation) ([]statement, error) {
 	case *dropTable:
 		return []statement{dropTableSQL(liteQ, o)}, nil
 	case *renameTable:
-		return []statement{sqlStatement("ALTER TABLE %s RENAME TO %s", liteQ.ident(o.from), liteQ.ident(o.to))}, nil
+		// RENAME TO takes a bare name: renames stay within the schema.
+		return []statement{sqlStatement("ALTER TABLE %s RENAME TO %s", liteQ.table(o.from), liteQ.ident(baseName(o.to)))}, nil
 	case *alterTable:
 		return d.compileAlter(o)
 	case *recreateTable:
-		return compileRecreate(d, liteQ, func(from, to string) statement {
-			return sqlStatement("ALTER TABLE %s RENAME TO %s", liteQ.ident(from), liteQ.ident(to))
+		return compileRecreate(d, liteQ, true, func(from, to string) statement {
+			return sqlStatement("ALTER TABLE %s RENAME TO %s", liteQ.table(from), liteQ.ident(baseName(to)))
 		}, o.def)
 	case *rawSQL:
 		return []statement{{sql: o.sql, args: o.args}}, nil
@@ -78,20 +79,23 @@ func (d sqliteDialect) compileCreate(def *tableDef) ([]statement, error) {
 		clauses = append(clauses, fmt.Sprintf("CONSTRAINT %s PRIMARY KEY (%s)",
 			liteQ.ident(primaryName(def.constraintTable())), liteQ.idents(pk)))
 	}
+	for _, chk := range def.checks {
+		clauses = append(clauses, checkClause(liteQ, chk))
+	}
 	for _, fk := range def.fks {
 		clauses = append(clauses, foreignClause(liteQ, def.constraintTable(), fk))
 	}
 
 	stmts := []statement{sqlStatement("CREATE TABLE %s (\n\t%s\n)",
-		liteQ.ident(def.name), strings.Join(clauses, ",\n\t"))}
+		liteQ.table(def.name), strings.Join(clauses, ",\n\t"))}
 	for _, idx := range append(inlineIndexes(def.columns), def.indexes...) {
-		stmts = append(stmts, statement{sql: createIndexSQL(liteQ, def.name, idx)})
+		stmts = append(stmts, statement{sql: createIndexSQL(liteQ, def.name, idx, true)})
 	}
 	return stmts, nil
 }
 
 func (d sqliteDialect) compileAlter(op *alterTable) ([]statement, error) {
-	table := liteQ.ident(op.table)
+	table := liteQ.table(op.table)
 	var stmts []statement
 	for _, ch := range op.changes {
 		switch c := ch.(type) {
@@ -105,20 +109,24 @@ func (d sqliteDialect) compileAlter(op *alterTable) ([]statement, error) {
 			}
 			stmts = append(stmts, sqlStatement("ALTER TABLE %s ADD COLUMN %s", table, clause))
 			for _, idx := range inlineIndexes([]*columnDef{c.col}) {
-				stmts = append(stmts, statement{sql: createIndexSQL(liteQ, op.table, idx)})
+				stmts = append(stmts, statement{sql: createIndexSQL(liteQ, op.table, idx, true)})
 			}
 		case *dropColumn:
 			stmts = append(stmts, sqlStatement("ALTER TABLE %s DROP COLUMN %s", table, liteQ.ident(c.name)))
 		case *renameColumn:
 			stmts = append(stmts, sqlStatement("ALTER TABLE %s RENAME COLUMN %s TO %s", table, liteQ.ident(c.from), liteQ.ident(c.to)))
 		case *addIndex:
-			stmts = append(stmts, statement{sql: createIndexSQL(liteQ, op.table, c.idx)})
+			stmts = append(stmts, statement{sql: createIndexSQL(liteQ, op.table, c.idx, true)})
 		case *dropIndex:
-			stmts = append(stmts, sqlStatement("DROP INDEX %s", liteQ.ident(c.name)))
+			stmts = append(stmts, sqlStatement("DROP INDEX %s", liteQ.table(schemaPrefix(op.table)+c.name)))
 		case *renameIndex:
 			return nil, fmt.Errorf("migrate: sqlite cannot rename index %q; drop it and declare a new one", c.from)
 		case *setTableComment:
 			// SQLite has no table comments; the declaration is documentation.
+		case *addCheck:
+			return nil, fmt.Errorf("migrate: sqlite cannot add a check constraint to existing table %q; declare it in Create, or use Schema.Recreate", op.table)
+		case *dropCheck:
+			return nil, fmt.Errorf("migrate: sqlite cannot drop a check constraint from table %q; use Schema.Recreate", op.table)
 		case *addForeign:
 			return nil, fmt.Errorf("migrate: sqlite cannot add a foreign key to existing table %q; declare it in Create, or use Schema.Recreate", op.table)
 		case *dropForeign:
@@ -150,6 +158,7 @@ func (d sqliteDialect) columnSQL(table string, c *columnDef) (string, error) {
 	if !c.nullable {
 		b.WriteString(" NOT NULL")
 	}
+	b.WriteString(generatedClause(c))
 	def, err := defaultClause(c, false, "CURRENT_TIMESTAMP")
 	if err != nil {
 		return "", err
@@ -202,12 +211,12 @@ func (sqliteDialect) typeSQL(c *columnDef) (string, error) {
 func (sqliteDialect) lock(context.Context, *sql.Conn, string, time.Duration) error { return nil }
 func (sqliteDialect) unlock(context.Context, *sql.Conn, string) error              { return nil }
 
-func (sqliteDialect) quoteIdent(name string) string { return liteQ.ident(name) }
+func (sqliteDialect) quoteIdent(name string) string { return liteQ.table(name) }
 
 func (sqliteDialect) listTablesSQL() string {
 	return "SELECT name FROM sqlite_master WHERE type = 'table' AND name NOT LIKE 'sqlite_%'"
 }
 
 func (sqliteDialect) freshDropSQL(table string) string {
-	return fmt.Sprintf("DROP TABLE IF EXISTS %s", liteQ.ident(table))
+	return fmt.Sprintf("DROP TABLE IF EXISTS %s", liteQ.table(table))
 }

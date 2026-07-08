@@ -70,6 +70,37 @@ func (q quoter) idents(names []string) string {
 	return strings.Join(quoted, ", ")
 }
 
+// table quotes a possibly schema-qualified table name: dots separate path
+// segments, each quoted on its own ("analytics.events" → "analytics"."events").
+// Table names therefore cannot contain literal dots — the standard trade-off
+// every schema-aware tool makes.
+func (q quoter) table(name string) string {
+	segs := strings.Split(name, ".")
+	for i, s := range segs {
+		segs[i] = q.ident(s)
+	}
+	return strings.Join(segs, ".")
+}
+
+// baseName strips the schema qualification from a table name. Conventional
+// constraint and index names build on it: constraints live inside the table's
+// schema already, and Postgres refuses qualified names in those positions.
+func baseName(table string) string {
+	if i := strings.LastIndexByte(table, '.'); i >= 0 {
+		return table[i+1:]
+	}
+	return table
+}
+
+// schemaPrefix returns the qualification up to and including the final dot,
+// or "" for a bare name. Postgres and SQLite drop indexes by qualified name.
+func schemaPrefix(table string) string {
+	if i := strings.LastIndexByte(table, '.'); i >= 0 {
+		return table[:i+1]
+	}
+	return ""
+}
+
 // literal renders a Go value as a SQL literal for DDL default clauses, which
 // cannot use bind parameters. backslashEscapes marks dialects (MySQL) whose
 // strings treat backslash as an escape character.
@@ -107,7 +138,25 @@ func enumCheckSQL(q quoter, table string, c *columnDef) string {
 		vals[i] = "'" + strings.ReplaceAll(v, "'", "''") + "'"
 	}
 	return fmt.Sprintf(" CONSTRAINT %s CHECK (%s IN (%s))",
-		q.ident(table+"_"+c.name+"_check"), q.ident(c.name), strings.Join(vals, ", "))
+		q.ident(baseName(table)+"_"+c.name+"_check"), q.ident(c.name), strings.Join(vals, ", "))
+}
+
+// generatedClause renders GENERATED ALWAYS AS (...) STORED|VIRTUAL, shared
+// verbatim by all three dialects.
+func generatedClause(c *columnDef) string {
+	if c.generatedExpr == "" {
+		return ""
+	}
+	kind := " STORED"
+	if c.generatedVirtual {
+		kind = " VIRTUAL"
+	}
+	return " GENERATED ALWAYS AS (" + c.generatedExpr + ")" + kind
+}
+
+// checkClause renders a named table-level CHECK constraint.
+func checkClause(q quoter, chk *checkDef) string {
+	return fmt.Sprintf("CONSTRAINT %s CHECK (%s)", q.ident(chk.name), chk.expr)
 }
 
 // defaultClause renders the DEFAULT part of a column definition. currentTS is
@@ -138,7 +187,7 @@ func foreignClause(q quoter, table string, fk *foreignDef) string {
 	}
 	var b strings.Builder
 	fmt.Fprintf(&b, "CONSTRAINT %s FOREIGN KEY (%s) REFERENCES %s (%s)",
-		q.ident(fk.resolvedName(table)), q.idents(fk.columns), q.ident(fk.refTable), q.idents(refCols))
+		q.ident(fk.resolvedName(table)), q.idents(fk.columns), q.table(fk.refTable), q.idents(refCols))
 	if fk.onDelete != "" {
 		b.WriteString(" ON DELETE " + fk.onDelete)
 	}
@@ -151,13 +200,22 @@ func foreignClause(q quoter, table string, fk *foreignDef) string {
 // createIndexSQL renders a standalone CREATE INDEX, shared by all dialects.
 // Single-column indexes declared with Column.Unique/Index compile through
 // here too, so every index carries the conventional, reconstructible name.
-func createIndexSQL(q quoter, table string, idx *indexDef) string {
+//
+// Engines disagree on where a schema qualification goes: SQLite attaches it
+// to the index name (the table must be bare), Postgres and MySQL to the table
+// (the index name must be bare).
+func createIndexSQL(q quoter, table string, idx *indexDef, schemaOnIndex bool) string {
 	unique := ""
 	if idx.unique {
 		unique = "UNIQUE "
 	}
+	name := idx.resolvedName(table)
+	if schemaOnIndex {
+		return fmt.Sprintf("CREATE %sINDEX %s ON %s (%s)",
+			unique, q.table(schemaPrefix(table)+name), q.ident(baseName(table)), q.idents(idx.columns))
+	}
 	return fmt.Sprintf("CREATE %sINDEX %s ON %s (%s)",
-		unique, q.ident(idx.resolvedName(table)), q.ident(table), q.idents(idx.columns))
+		unique, q.ident(name), q.table(table), q.idents(idx.columns))
 }
 
 // charLength defends against zero and negative declared lengths; the fluent
@@ -223,12 +281,13 @@ func declarationErrors(errs []error) error {
 // constraintBase, so nothing keeps a temporary name after the rename. Child
 // foreign keys referencing the table resolve by name again once the rename
 // lands — the same order Alembic uses for SQLite batch mode.
-func compileRecreate(d Dialect, q quoter, renameSQL func(from, to string) statement, def *tableDef) ([]statement, error) {
+func compileRecreate(d Dialect, q quoter, schemaOnIndex bool, renameSQL func(from, to string) statement, def *tableDef) ([]statement, error) {
 	tmp := def.name + "__migrate_new"
 	tmpDef := &tableDef{
 		name:           tmp,
 		constraintBase: def.name,
 		primary:        def.primary,
+		checks:         def.checks,
 		comment:        def.comment,
 	}
 	for _, c := range def.columns {
@@ -246,21 +305,27 @@ func compileRecreate(d Dialect, q quoter, renameSQL func(from, to string) statem
 	if err != nil {
 		return nil, err
 	}
-	var copyCols []string
+	var copyCols, copyExprs []string
 	for _, c := range def.columns {
-		if !c.skipCopy {
-			copyCols = append(copyCols, c.name)
+		if c.skipCopy || c.generatedExpr != "" { // generated columns fill themselves
+			continue
+		}
+		copyCols = append(copyCols, c.name)
+		if c.copyFrom != "" {
+			copyExprs = append(copyExprs, c.copyFrom)
+		} else {
+			copyExprs = append(copyExprs, q.ident(c.name))
 		}
 	}
 	if len(copyCols) > 0 {
 		stmts = append(stmts, sqlStatement("INSERT INTO %s (%s) SELECT %s FROM %s",
-			q.ident(tmp), q.idents(copyCols), q.idents(copyCols), q.ident(def.name)))
+			q.table(tmp), q.idents(copyCols), strings.Join(copyExprs, ", "), q.table(def.name)))
 	}
 	stmts = append(stmts,
-		sqlStatement("DROP TABLE %s", q.ident(def.name)),
+		sqlStatement("DROP TABLE %s", q.table(def.name)),
 		renameSQL(tmp, def.name))
 	for _, idx := range append(inlineIndexes(def.columns), def.indexes...) {
-		stmts = append(stmts, statement{sql: createIndexSQL(q, def.name, idx)})
+		stmts = append(stmts, statement{sql: createIndexSQL(q, def.name, idx, schemaOnIndex)})
 	}
 	return stmts, nil
 }

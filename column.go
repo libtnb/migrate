@@ -109,6 +109,47 @@ func (c *Column) First() *Column {
 	return c
 }
 
+// StoredAs makes the column a stored generated column, computed from the
+// expression and written to disk:
+//
+//	t.String("full_name").StoredAs("first_name || ' ' || last_name")
+//
+// Generated columns take no Default and cannot auto-increment. Postgres
+// supports stored generated columns from version 12.
+func (c *Column) StoredAs(expr string) *Column {
+	c.def.generatedExpr = expr
+	c.def.generatedVirtual = false
+	return c
+}
+
+// VirtualAs makes the column a virtual generated column, computed on read:
+//
+//	t.JSON("meta")
+//	t.String("kind", 32).VirtualAs("json_extract(meta, '$.kind')")
+//
+// MySQL and SQLite compute virtual columns natively; Postgres added them in
+// version 18 — on older servers the statement fails.
+func (c *Column) VirtualAs(expr string) *Column {
+	c.def.generatedExpr = expr
+	c.def.generatedVirtual = true
+	return c
+}
+
+// CopyFrom sets the SELECT expression that fills this column during a
+// Schema.Recreate, instead of copying a column of the same name — renames and
+// type conversions in one step:
+//
+//	s.Recreate("events", func(t *migrate.Table) {
+//		t.ID()
+//		t.Integer("age_years").CopyFrom("CAST(age AS INTEGER)")
+//	})
+//
+// Outside Recreate it has no effect.
+func (c *Column) CopyFrom(expr string) *Column {
+	c.def.copyFrom = expr
+	return c
+}
+
 // SkipCopy marks a column that does not exist in the old table during a
 // Schema.Recreate: the row copy leaves it out, so it starts from its default
 // (or NULL). Outside Recreate it has no effect.

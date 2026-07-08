@@ -143,7 +143,18 @@ s.Create("articles", func(t *migrate.Table) {
 Columns are `NOT NULL` unless declared `.Nullable()`. Modifiers chain:
 `.Default(v)`, `.DefaultExpr(expr)`, `.UseCurrent()`, `.Unsigned()`,
 `.Unique()`, `.Index()`, `.Primary()`, `.AutoIncrement()`, `.Comment(...)`,
-and MySQL's `.After(...)`/`.First()`/`.UseCurrentOnUpdate()`.
+`.StoredAs(expr)`/`.VirtualAs(expr)` for generated columns, and MySQL's
+`.After(...)`/`.First()`/`.UseCurrentOnUpdate()`.
+
+Table names may be schema-qualified — `s.Create("analytics.events", ...)`
+renders `"analytics"."events"` and conventional constraint names stay inside
+the schema. Named CHECK constraints round out the constraint set (anonymous
+checks are rejected — an unnamed constraint cannot be dropped later):
+
+```go
+t.Check("orders_price_positive", "price > 0")   // in Create or Table
+t.DropCheck("orders_price_positive")            // reverses an added check
+```
 
 `.AutoIncrement()` turns any integer column into the database-generated
 primary key, preferring each engine's generated-column form: an SQL-standard
@@ -203,7 +214,13 @@ s.Recreate("users", func(t *migrate.Table) {
 })
 ```
 
-Columns copy by name; `SkipCopy` marks ones the old table does not have.
+Columns copy by name; `SkipCopy` marks ones the old table does not have, and
+`CopyFrom` substitutes a SELECT expression — renaming a column and converting
+its type in one rebuild:
+
+```go
+t.Integer("age").CopyFrom("CAST(age AS INTEGER)")
+```
 Conventional constraint and index names come out for the *final* table name,
 so later `DropUnique`/`DropForeign` calls still resolve. Recreate discards
 the old definition, so rolling back needs a `WithDown` (usually another

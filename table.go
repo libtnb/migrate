@@ -265,6 +265,27 @@ func (t *Table) Primary(columns ...string) {
 	}
 }
 
+// Check declares a named CHECK constraint over an expression written
+// verbatim:
+//
+//	t.Check("orders_price_positive", "price > 0")
+//
+// The name is required — anonymous constraints cannot be dropped or reasoned
+// about later. Inside Schema.Table, SQLite cannot add constraints; use
+// Schema.Recreate there.
+func (t *Table) Check(name, expr string) {
+	if name == "" || expr == "" {
+		t.errf("check constraint on table %q needs both a name and an expression", t.table)
+		return
+	}
+	chk := &checkDef{name: name, expr: expr}
+	if t.create != nil {
+		t.create.checks = append(t.create.checks, chk)
+	} else {
+		t.alter.changes = append(t.alter.changes, &addCheck{chk: chk})
+	}
+}
+
 // Foreign declares a foreign key on existing columns:
 //
 //	t.Foreign("user_id").References("users")        // references users.id
@@ -360,6 +381,14 @@ func (t *Table) DropForeign(columns ...string) {
 func (t *Table) DropForeignByName(name string) {
 	if t.alterOnly("DropForeignByName") {
 		t.alter.changes = append(t.alter.changes, &dropForeign{name: name})
+	}
+}
+
+// DropCheck removes a CHECK constraint by name. Dropping discards the
+// expression and is irreversible.
+func (t *Table) DropCheck(name string) {
+	if t.alterOnly("DropCheck") {
+		t.alter.changes = append(t.alter.changes, &dropCheck{name: name})
 	}
 }
 

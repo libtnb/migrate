@@ -26,7 +26,7 @@ func (postgresDialect) ensureTableSQL(table string) string {
 	batch INTEGER NOT NULL,
 	checksum CHAR(64) NOT NULL,
 	applied_at VARCHAR(32) NOT NULL
-)`, pgQ.ident(table))
+)`, pgQ.table(table))
 }
 
 func (d postgresDialect) compile(op operation) ([]statement, error) {
@@ -36,12 +36,13 @@ func (d postgresDialect) compile(op operation) ([]statement, error) {
 	case *dropTable:
 		return []statement{dropTableSQL(pgQ, o)}, nil
 	case *renameTable:
-		return []statement{sqlStatement("ALTER TABLE %s RENAME TO %s", pgQ.ident(o.from), pgQ.ident(o.to))}, nil
+		// RENAME TO takes a bare name: renames stay within the schema.
+		return []statement{sqlStatement("ALTER TABLE %s RENAME TO %s", pgQ.table(o.from), pgQ.ident(baseName(o.to)))}, nil
 	case *alterTable:
 		return d.compileAlter(o)
 	case *recreateTable:
-		return compileRecreate(d, pgQ, func(from, to string) statement {
-			return sqlStatement("ALTER TABLE %s RENAME TO %s", pgQ.ident(from), pgQ.ident(to))
+		return compileRecreate(d, pgQ, false, func(from, to string) statement {
+			return sqlStatement("ALTER TABLE %s RENAME TO %s", pgQ.table(from), pgQ.ident(baseName(to)))
 		}, o.def)
 	case *rawSQL:
 		return []statement{{sql: o.sql, args: o.args}}, nil
@@ -74,14 +75,17 @@ func (d postgresDialect) compileCreate(def *tableDef) ([]statement, error) {
 		clauses = append(clauses, fmt.Sprintf("CONSTRAINT %s PRIMARY KEY (%s)",
 			pgQ.ident(primaryName(def.constraintTable())), pgQ.idents(pk)))
 	}
+	for _, chk := range def.checks {
+		clauses = append(clauses, checkClause(pgQ, chk))
+	}
 	for _, fk := range def.fks {
 		clauses = append(clauses, foreignClause(pgQ, def.constraintTable(), fk))
 	}
 
 	stmts := []statement{sqlStatement("CREATE TABLE %s (\n\t%s\n)",
-		pgQ.ident(def.name), strings.Join(clauses, ",\n\t"))}
+		pgQ.table(def.name), strings.Join(clauses, ",\n\t"))}
 	for _, idx := range append(inlineIndexes(def.columns), def.indexes...) {
-		stmts = append(stmts, statement{sql: createIndexSQL(pgQ, def.name, idx)})
+		stmts = append(stmts, statement{sql: createIndexSQL(pgQ, def.name, idx, false)})
 	}
 	if def.comment != "" {
 		stmts = append(stmts, d.tableCommentSQL(def.name, def.comment))
@@ -90,7 +94,7 @@ func (d postgresDialect) compileCreate(def *tableDef) ([]statement, error) {
 }
 
 func (d postgresDialect) compileAlter(op *alterTable) ([]statement, error) {
-	table := pgQ.ident(op.table)
+	table := pgQ.table(op.table)
 	var stmts []statement
 	for _, ch := range op.changes {
 		switch c := ch.(type) {
@@ -101,7 +105,7 @@ func (d postgresDialect) compileAlter(op *alterTable) ([]statement, error) {
 			}
 			stmts = append(stmts, sqlStatement("ALTER TABLE %s ADD COLUMN %s", table, clause))
 			for _, idx := range inlineIndexes([]*columnDef{c.col}) {
-				stmts = append(stmts, statement{sql: createIndexSQL(pgQ, op.table, idx)})
+				stmts = append(stmts, statement{sql: createIndexSQL(pgQ, op.table, idx, false)})
 			}
 			if c.col.comment != "" {
 				stmts = append(stmts, d.commentSQL(op.table, c.col))
@@ -111,9 +115,11 @@ func (d postgresDialect) compileAlter(op *alterTable) ([]statement, error) {
 		case *renameColumn:
 			stmts = append(stmts, sqlStatement("ALTER TABLE %s RENAME COLUMN %s TO %s", table, pgQ.ident(c.from), pgQ.ident(c.to)))
 		case *addIndex:
-			stmts = append(stmts, statement{sql: createIndexSQL(pgQ, op.table, c.idx)})
+			stmts = append(stmts, statement{sql: createIndexSQL(pgQ, op.table, c.idx, false)})
 		case *dropIndex:
-			stmts = append(stmts, sqlStatement("DROP INDEX %s", pgQ.ident(c.name)))
+			// Indexes live in the table's schema; dropping needs the same
+			// qualification the table carries.
+			stmts = append(stmts, sqlStatement("DROP INDEX %s", pgQ.table(schemaPrefix(op.table)+c.name)))
 		case *addForeign:
 			stmts = append(stmts, sqlStatement("ALTER TABLE %s ADD %s", table, foreignClause(pgQ, op.table, c.fk)))
 		case *dropForeign:
@@ -127,6 +133,10 @@ func (d postgresDialect) compileAlter(op *alterTable) ([]statement, error) {
 			stmts = append(stmts, sqlStatement("ALTER INDEX %s RENAME TO %s", pgQ.ident(c.from), pgQ.ident(c.to)))
 		case *setTableComment:
 			stmts = append(stmts, d.tableCommentSQL(op.table, c.comment))
+		case *addCheck:
+			stmts = append(stmts, sqlStatement("ALTER TABLE %s ADD %s", table, checkClause(pgQ, c.chk)))
+		case *dropCheck:
+			stmts = append(stmts, sqlStatement("ALTER TABLE %s DROP CONSTRAINT %s", table, pgQ.ident(c.name)))
 		default:
 			return nil, fmt.Errorf("migrate: postgres: unsupported change %T", ch)
 		}
@@ -151,6 +161,7 @@ func (d postgresDialect) columnSQL(table string, c *columnDef) (string, error) {
 		b.WriteString(" PRIMARY KEY")
 		return b.String(), nil
 	}
+	b.WriteString(generatedClause(c))
 	if !c.nullable {
 		b.WriteString(" NOT NULL")
 	}
@@ -210,7 +221,7 @@ func (postgresDialect) typeSQL(c *columnDef) (string, error) {
 
 func (postgresDialect) commentSQL(table string, c *columnDef) statement {
 	comment := strings.ReplaceAll(c.comment, "'", "''")
-	return sqlStatement("COMMENT ON COLUMN %s.%s IS '%s'", pgQ.ident(table), pgQ.ident(c.name), comment)
+	return sqlStatement("COMMENT ON COLUMN %s.%s IS '%s'", pgQ.table(table), pgQ.ident(c.name), comment)
 }
 
 // Advisory locking: the lock key is derived inside Postgres itself from the
@@ -259,13 +270,13 @@ func dropTableSQL(q quoter, o *dropTable) statement {
 	if o.ifExists {
 		ifExists = "IF EXISTS "
 	}
-	return sqlStatement("DROP TABLE %s%s", ifExists, q.ident(o.name))
+	return sqlStatement("DROP TABLE %s%s", ifExists, q.table(o.name))
 }
 
-func (postgresDialect) quoteIdent(name string) string { return pgQ.ident(name) }
+func (postgresDialect) quoteIdent(name string) string { return pgQ.table(name) }
 
 func (postgresDialect) tableCommentSQL(table, comment string) statement {
-	return sqlStatement("COMMENT ON TABLE %s IS '%s'", pgQ.ident(table), strings.ReplaceAll(comment, "'", "''"))
+	return sqlStatement("COMMENT ON TABLE %s IS '%s'", pgQ.table(table), strings.ReplaceAll(comment, "'", "''"))
 }
 
 func (postgresDialect) listTablesSQL() string {
@@ -275,5 +286,5 @@ func (postgresDialect) listTablesSQL() string {
 // CASCADE also removes dependent objects such as views, which plain table
 // drops would trip over.
 func (postgresDialect) freshDropSQL(table string) string {
-	return fmt.Sprintf("DROP TABLE IF EXISTS %s CASCADE", pgQ.ident(table))
+	return fmt.Sprintf("DROP TABLE IF EXISTS %s CASCADE", pgQ.table(table))
 }
