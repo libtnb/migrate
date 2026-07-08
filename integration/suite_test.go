@@ -116,7 +116,7 @@ func runEndToEnd(t *testing.T, db *sql.DB, dialect migrate.Dialect) {
 
 	// Roll back the latest batch: both migrations were one batch here, so
 	// step once instead.
-	if err := m.Rollback(ctx, migrate.Steps(1)); err != nil {
+	if err := m.Rollback(ctx, 1); err != nil {
 		t.Fatalf("Rollback: %v", err)
 	}
 	if _, err := db.Exec(`SELECT COUNT(*) FROM posts`); err == nil {
@@ -217,7 +217,7 @@ func runDataMigration(t *testing.T, db *sql.DB, dialect migrate.Dialect) {
 	if got := count(t, db, `SELECT COUNT(*) FROM users WHERE display_name = 'seed'`); got != 1 {
 		t.Errorf("data migration should have backfilled, got %d", got)
 	}
-	if err := m.Rollback(ctx); err != nil {
+	if err := m.Rollback(ctx, 1); err != nil {
 		t.Fatalf("Rollback via explicit down: %v", err)
 	}
 }
@@ -294,7 +294,7 @@ func runRepeatable(t *testing.T, db *sql.DB, dialect migrate.Dialect) {
 	if _, err := db.Exec("DROP VIEW IF EXISTS adults"); err != nil {
 		t.Fatalf("drop dependent view: %v", err)
 	}
-	if err := m21.Rollback(ctx, migrate.Steps(1)); err != nil {
+	if err := m21.Rollback(ctx, 1); err != nil {
 		t.Fatalf("Rollback: %v", err)
 	}
 	if got := count(t, db, "SELECT COUNT(*) FROM schema_migrations WHERE batch = -1"); got != 1 {

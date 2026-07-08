@@ -148,7 +148,7 @@ func TestSQLiteAlterRollback(t *testing.T) {
 	mustExec(t, db, "INSERT INTO users (mail, nickname) VALUES ('a@x.dev', 'a')")
 
 	// Both migrations landed in one batch; step back just the alteration.
-	if err := m.Rollback(ctx, migrate.Steps(1)); err != nil {
+	if err := m.Rollback(ctx, 1); err != nil {
 		t.Fatalf("Rollback: %v", err)
 	}
 	if got := count(t, db, "SELECT COUNT(*) FROM users WHERE email = 'a@x.dev'"); got != 1 {
@@ -221,7 +221,7 @@ func TestSQLiteRecreate(t *testing.T) {
 	}
 
 	// The explicit down rebuilds the permissive shape.
-	if err := m.Rollback(ctx, migrate.Steps(1)); err != nil {
+	if err := m.Rollback(ctx, 1); err != nil {
 		t.Fatalf("Rollback: %v", err)
 	}
 	mustExec(t, db, "INSERT INTO users (email) VALUES ('a@x.dev')")
@@ -295,7 +295,7 @@ func TestSQLiteQualifiedNames(t *testing.T) {
 	if _, err := db.Exec("INSERT INTO aux.items (name) VALUES ('x')"); err == nil {
 		t.Error("the unique index should exist in the attached schema")
 	}
-	if err := m.Rollback(ctx); err != nil {
+	if err := m.Rollback(ctx, 1); err != nil {
 		t.Fatalf("Rollback: %v", err)
 	}
 	if got := count(t, db, "SELECT COUNT(*) FROM sqlite_master WHERE name = 'items'"); got != 0 {

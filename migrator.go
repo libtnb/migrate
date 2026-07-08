@@ -152,51 +152,37 @@ func (m *Migrator) dueRepeatables(recs []record) (due []*Migration, dueExists []
 	return due, dueExists, nil
 }
 
-// RollbackOption narrows what Rollback and PlanRollback roll back.
-type RollbackOption func(*rollbackSpec)
-
 type rollbackSpec struct {
-	steps   int // 0 means the whole latest batch
-	reset   bool
-	invalid error
+	steps int  // > 0: that many most recent migrations
+	batch bool // the whole latest batch
+	reset bool // everything, baselined rows included
 }
 
-// Steps limits the rollback to the n most recently applied migrations,
-// regardless of batches. n must be positive; anything else makes Rollback
-// fail instead of silently widening its blast radius.
-func Steps(n int) RollbackOption {
-	return func(s *rollbackSpec) {
-		if n < 1 {
-			s.invalid = fmt.Errorf("migrate: Steps requires a positive count, got %d", n)
-			return
-		}
-		s.steps = n
-	}
-}
-
-// Rollback reverses the most recent batch of migrations in reverse
-// application order — everything the last Up applied, which after a first
-// deploy is every migration; use Steps(1) to undo just the newest one.
-// Migrations declared with WithDown run their explicit down; the rest
-// reverse their recorded operations automatically. A migration whose
+// Rollback undoes the steps most recently applied migrations in reverse
+// application order — Rollback(ctx, 1) undoes just the newest one. steps must
+// be positive. Migrations declared with WithDown run their explicit down; the
+// rest reverse their recorded operations automatically. A migration whose
 // operations discard information (Drop, DropColumn, Exec, Run) fails with
 // ErrIrreversible instead of guessing. Baselined rows are never touched.
-func (m *Migrator) Rollback(ctx context.Context, opts ...RollbackOption) error {
-	return m.rollback(ctx, resolveSpec(opts))
+func (m *Migrator) Rollback(ctx context.Context, steps int) error {
+	if steps < 1 {
+		return fmt.Errorf("migrate: Rollback requires a positive step count, got %d", steps)
+	}
+	return m.rollback(ctx, rollbackSpec{steps: steps})
 }
 
-// Reset rolls back everything that was ever applied, leaving an empty
-// database. Every applied migration must be reversible or declare a down.
+// RollbackBatch undoes the most recent batch: everything the last Up applied
+// together, which after a first deploy is every migration. Baselined rows are
+// never touched.
+func (m *Migrator) RollbackBatch(ctx context.Context) error {
+	return m.rollback(ctx, rollbackSpec{batch: true})
+}
+
+// Reset rolls back everything that was ever applied — baselined rows included
+// — leaving an empty database. Every applied migration must be reversible or
+// declare a down.
 func (m *Migrator) Reset(ctx context.Context) error {
 	return m.rollback(ctx, rollbackSpec{reset: true})
-}
-
-func resolveSpec(opts []RollbackOption) rollbackSpec {
-	var spec rollbackSpec
-	for _, opt := range opts {
-		opt(&spec)
-	}
-	return spec
 }
 
 func (m *Migrator) rollback(ctx context.Context, spec rollbackSpec) error {
@@ -230,9 +216,6 @@ func (m *Migrator) rollback(ctx context.Context, spec rollbackSpec) error {
 // rollbackTargets resolves which applied migrations the spec selects, newest
 // first, failing when one of them is not registered in the collection.
 func (m *Migrator) rollbackTargets(ctx context.Context, conn *sql.Conn, spec rollbackSpec) ([]*Migration, error) {
-	if spec.invalid != nil {
-		return nil, spec.invalid
-	}
 	recs, err := m.loadState(ctx, conn)
 	if err != nil {
 		return nil, err

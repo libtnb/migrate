@@ -224,7 +224,7 @@ func TestRollbackLatestBatchOnly(t *testing.T) {
 		appliedRecord(t, c, Postgres, "002_posts", 2),
 	)
 	m := testMigrator(t, f, Postgres, c)
-	if err := m.Rollback(context.Background()); err != nil {
+	if err := m.RollbackBatch(context.Background()); err != nil {
 		t.Fatalf("Rollback: %v", err)
 	}
 	if len(f.loggedContaining(`DROP TABLE "posts"`)) != 1 {
@@ -246,7 +246,7 @@ func TestRollbackSteps(t *testing.T) {
 		appliedRecord(t, c, Postgres, "002_posts", 1),
 	)
 	m := testMigrator(t, f, Postgres, c)
-	if err := m.Rollback(context.Background(), Steps(1)); err != nil {
+	if err := m.Rollback(context.Background(), 1); err != nil {
 		t.Fatalf("Rollback: %v", err)
 	}
 	// Within one batch the later name rolls back first.
@@ -277,7 +277,7 @@ func TestRollbackUnregisteredFails(t *testing.T) {
 	f := newFakeDB()
 	f.setRecords(record{version: "000_ghost", batch: 1, checksum: "", appliedAt: "2026-07-08T00:00:00.000000Z"})
 	m := testMigrator(t, f, Postgres, twoTables())
-	err := m.Rollback(context.Background())
+	err := m.RollbackBatch(context.Background())
 	if err == nil || !strings.Contains(err.Error(), "000_ghost") || !strings.Contains(err.Error(), "not registered") {
 		t.Fatalf("err = %v, want a not-registered error naming 000_ghost", err)
 	}
@@ -288,7 +288,7 @@ func TestRollbackIrreversibleFails(t *testing.T) {
 	c := NewCollection()
 	c.Add("001_raw", func(s *Schema) { s.Exec("UPDATE t SET x = 1") })
 	f.setRecords(appliedRecord(t, c, Postgres, "001_raw", 1))
-	err := testMigrator(t, f, Postgres, c).Rollback(context.Background())
+	err := testMigrator(t, f, Postgres, c).Rollback(context.Background(), 1)
 	if !errors.Is(err, ErrIrreversible) {
 		t.Fatalf("err = %v, want ErrIrreversible", err)
 	}
@@ -367,7 +367,7 @@ func TestPlanRollbackRendersDown(t *testing.T) {
 		appliedRecord(t, c, Postgres, "002_posts", 2),
 	)
 	m := testMigrator(t, f, Postgres, c)
-	plans, err := m.PlanRollback(context.Background())
+	plans, err := m.PlanRollbackBatch(context.Background())
 	if err != nil {
 		t.Fatalf("PlanRollback: %v", err)
 	}

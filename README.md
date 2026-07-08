@@ -82,10 +82,10 @@ if err := m.Up(ctx); err != nil {
   Postgres; `DATETIME(6)`, native `ENUM` on MySQL). Where an engine cannot do
   something — SQLite altering constraints — compiling returns a clear error
   instead of silently skipping the change.
-- **Batch-aware history.** Each `Up` run is one batch; `Rollback` undoes the
-  latest batch, `Steps(n)` undoes exactly n migrations, `Reset` undoes
-  everything. `Baseline` adopts a pre-existing database without executing
-  anything.
+- **Batch-aware history.** Each `Up` run is one batch; `Rollback(ctx, n)`
+  undoes exactly n migrations, `RollbackBatch` undoes everything the last
+  `Up` applied, `Reset` undoes everything ever. `Baseline` adopts a
+  pre-existing database without executing anything.
 - **Zero dependencies.** Only `database/sql` and the standard library: you
   pass in the `*sql.DB` you already have, with whatever driver you chose.
 
@@ -324,11 +324,12 @@ objects you did not name). And on databases without `CREATE OR REPLACE`
 | Call | Effect |
 |---|---|
 | `m.Up(ctx)` | apply all pending migrations as one batch |
-| `m.Rollback(ctx)` | undo the latest batch |
-| `m.Rollback(ctx, migrate.Steps(2))` | undo the two most recent migrations |
+| `m.Rollback(ctx, 1)` | undo the most recently applied migration |
+| `m.Rollback(ctx, n)` | undo the n most recent migrations |
+| `m.RollbackBatch(ctx)` | undo the latest batch — everything the last `Up` applied |
 | `m.Reset(ctx)` | undo everything |
 | `m.Status(ctx)` | applied / pending / drifted / unregistered, per migration |
-| `m.Plan(ctx)` / `m.PlanRollback(ctx)` | the SQL that would run, without running it |
+| `m.Plan(ctx)` / `m.PlanRollback(ctx, n)` / `m.PlanRollbackBatch(ctx)` | the SQL that would run, without running it |
 | `m.Baseline(ctx)` | mark migrations applied without executing (existing databases) |
 | `m.Repair(ctx)` | re-record versioned checksums after a reviewed change (repeatables stay due) |
 | `m.Fresh(ctx)` | **development only**: drop every table, re-run everything |

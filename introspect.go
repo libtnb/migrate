@@ -144,9 +144,22 @@ func (m *Migrator) plannedFor(mig *Migration) (Planned, error) {
 	return p, nil
 }
 
-// PlanRollback renders the SQL that Rollback with the same options would
-// execute, without executing anything.
-func (m *Migrator) PlanRollback(ctx context.Context, opts ...RollbackOption) ([]Planned, error) {
+// PlanRollback renders the SQL that Rollback(ctx, steps) would execute,
+// without executing anything.
+func (m *Migrator) PlanRollback(ctx context.Context, steps int) ([]Planned, error) {
+	if steps < 1 {
+		return nil, fmt.Errorf("migrate: PlanRollback requires a positive step count, got %d", steps)
+	}
+	return m.planRollback(ctx, rollbackSpec{steps: steps})
+}
+
+// PlanRollbackBatch renders the SQL that RollbackBatch would execute, without
+// executing anything.
+func (m *Migrator) PlanRollbackBatch(ctx context.Context) ([]Planned, error) {
+	return m.planRollback(ctx, rollbackSpec{batch: true})
+}
+
+func (m *Migrator) planRollback(ctx context.Context, spec rollbackSpec) ([]Planned, error) {
 	var targets []*Migration
 	err := func() error {
 		conn, err := m.db.Conn(ctx)
@@ -154,7 +167,7 @@ func (m *Migrator) PlanRollback(ctx context.Context, opts ...RollbackOption) ([]
 			return fmt.Errorf("migrate: acquire connection: %w", err)
 		}
 		defer func() { _ = conn.Close() }()
-		targets, err = m.rollbackTargets(ctx, conn, resolveSpec(opts))
+		targets, err = m.rollbackTargets(ctx, conn, spec)
 		return err
 	}()
 	if err != nil {

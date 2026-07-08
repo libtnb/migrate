@@ -125,7 +125,7 @@ func TestRollbackNeverTouchesRepeatables(t *testing.T) {
 		repeatableRecord(t, c, "active_users_view"),
 	)
 	m := testMigrator(t, f, Postgres, c)
-	if err := m.Rollback(context.Background()); err != nil {
+	if err := m.RollbackBatch(context.Background()); err != nil {
 		t.Fatalf("Rollback: %v", err)
 	}
 	if len(f.loggedContaining(`DROP TABLE "users"`)) != 1 {

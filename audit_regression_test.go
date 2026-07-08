@@ -22,7 +22,7 @@ func TestRollbackNeverTouchesBaselinedRows(t *testing.T) {
 	m := testMigrator(t, f, Postgres, c)
 
 	// First rollback undoes the real batch.
-	if err := m.Rollback(context.Background()); err != nil {
+	if err := m.RollbackBatch(context.Background()); err != nil {
 		t.Fatalf("Rollback: %v", err)
 	}
 	if len(f.loggedContaining(`DROP TABLE "posts"`)) != 1 {
@@ -30,17 +30,17 @@ func TestRollbackNeverTouchesBaselinedRows(t *testing.T) {
 	}
 	// Second rollback finds only the baseline left — and must not touch it.
 	f.setRecords(base)
-	if err := m.Rollback(context.Background()); err != nil {
+	if err := m.RollbackBatch(context.Background()); err != nil {
 		t.Fatalf("second Rollback: %v", err)
 	}
 	if len(f.loggedContaining(`DROP TABLE "users"`)) != 0 {
 		t.Fatal("a plain Rollback must never drop baselined tables")
 	}
-	if err := m.Rollback(context.Background(), Steps(5)); err != nil {
-		t.Fatalf("Steps rollback: %v", err)
+	if err := m.Rollback(context.Background(), 5); err != nil {
+		t.Fatalf("steps rollback: %v", err)
 	}
 	if len(f.loggedContaining(`DROP TABLE "users"`)) != 0 {
-		t.Fatal("Steps must never drop baselined tables either")
+		t.Fatal("a step rollback must never drop baselined tables either")
 	}
 
 	// Reset is the documented exception.
@@ -214,24 +214,25 @@ func TestRenameIndexQualified(t *testing.T) {
 	})
 }
 
-// Codex round 2: Steps(-1) used to fall into the Reset branch, bypassing the
-// baseline protection a plain Rollback promises.
-func TestStepsRejectsNonPositiveCounts(t *testing.T) {
+// Codex round 2 (API reshaped in v0.4): a non-positive step count must fail
+// before anything loads — negative values used to alias Reset internally and
+// bypass the baseline protection.
+func TestRollbackRejectsNonPositiveSteps(t *testing.T) {
 	f := newFakeDB()
 	c := twoTables()
 	f.setRecords(appliedRecord(t, c, Postgres, "001_users", 0)) // baselined
 	m := testMigrator(t, f, Postgres, c)
 	for _, n := range []int{0, -1, -100} {
-		if err := m.Rollback(context.Background(), Steps(n)); err == nil ||
-			!strings.Contains(err.Error(), "positive count") {
-			t.Fatalf("Steps(%d) must fail, got: %v", n, err)
+		if err := m.Rollback(context.Background(), n); err == nil ||
+			!strings.Contains(err.Error(), "positive step count") {
+			t.Fatalf("Rollback(ctx, %d) must fail, got: %v", n, err)
 		}
 	}
 	if len(f.loggedContaining("DROP TABLE")) != 0 {
-		t.Fatal("nothing may execute for an invalid Steps count")
+		t.Fatal("nothing may execute for an invalid step count")
 	}
-	if _, err := m.PlanRollback(context.Background(), Steps(-1)); err == nil {
-		t.Fatal("PlanRollback must reject invalid Steps too")
+	if _, err := m.PlanRollback(context.Background(), -1); err == nil {
+		t.Fatal("PlanRollback must reject invalid steps too")
 	}
 }
 
