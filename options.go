@@ -102,7 +102,7 @@ func (c *config) validate() error {
 	if c.collection == nil {
 		return errors.New("migrate: collection must not be nil")
 	}
-	if c.table == "" || len(c.table) > 64 || strings.ContainsAny(c.table, "`\"'\x00") {
+	if c.table == "" || len(c.table) > 128 || strings.ContainsAny(c.table, "`\"'\x00") {
 		return fmt.Errorf("migrate: invalid records table name %q", c.table)
 	}
 	if c.lockTimeout <= 0 {

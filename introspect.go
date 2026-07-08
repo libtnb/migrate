@@ -212,9 +212,18 @@ func renderStatements(stmts []statement) []string {
 // baselined at their current checksum. Baselined rows carry batch 0, so the
 // first real Rollback never touches them (Reset still does).
 func (m *Migrator) Baseline(ctx context.Context, upTo ...string) error {
+	if len(upTo) > 1 {
+		return fmt.Errorf("migrate: Baseline takes at most one target, got %d", len(upTo))
+	}
 	limit := optional(upTo, "")
-	if limit != "" && m.cfg.collection.get(limit) == nil {
-		return fmt.Errorf("migrate: baseline target %q is not a registered migration", limit)
+	if limit != "" {
+		target := m.cfg.collection.get(limit)
+		if target == nil {
+			return fmt.Errorf("migrate: baseline target %q is not a registered migration", limit)
+		}
+		if target.repeatable {
+			return fmt.Errorf("migrate: baseline target %q is repeatable; the bound must be a versioned migration (repeatables are always baselined)", limit)
+		}
 	}
 	return m.locked(ctx, func(conn *sql.Conn) error {
 		recs, err := m.loadState(ctx, conn)

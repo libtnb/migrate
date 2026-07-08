@@ -253,3 +253,34 @@ func TestRecreateRequiresTransaction(t *testing.T) {
 		t.Fatal("nothing destructive may execute")
 	}
 }
+
+// Self-review round 4: combination gaps found by walking the option matrix.
+func TestBaselineValidation(t *testing.T) {
+	f := newFakeDB()
+	c := viewCollection("active") // one versioned + one repeatable
+	m := testMigrator(t, f, Postgres, c)
+
+	if err := m.Baseline(context.Background(), "a", "b"); err == nil {
+		t.Fatal("extra variadic arguments must not be silently ignored")
+	}
+	if err := m.Baseline(context.Background(), "active_users_view"); err == nil ||
+		!strings.Contains(err.Error(), "repeatable") {
+		t.Fatalf("a repeatable name is not a valid versioned bound, got: %v", err)
+	}
+	if err := m.Baseline(context.Background(), "001_users"); err != nil {
+		t.Fatalf("a versioned bound works: %v", err)
+	}
+}
+
+func TestDuplicateColumnDeclarationRejected(t *testing.T) {
+	m := migrationOf(t, func(s *Schema) {
+		s.Create("t", func(tb *Table) {
+			tb.ID()
+			tb.String("email")
+			tb.String("email")
+		})
+	})
+	if _, err := m.upOps(); err == nil || !strings.Contains(err.Error(), "twice") {
+		t.Fatalf("duplicate columns must be a declaration error, got: %v", err)
+	}
+}

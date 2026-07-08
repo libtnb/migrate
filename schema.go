@@ -132,7 +132,10 @@ func (s *Schema) Recreate(table string, fn func(*Table)) {
 	s.record(&recreateTable{def: def})
 }
 
-// Rename renames a table. It reverses to the opposite rename.
+// Rename renames a table within its schema; it reverses to the opposite
+// rename. Moving a table between schemas is refused at compile time on
+// Postgres (use Exec with ALTER TABLE ... SET SCHEMA) and SQLite; MySQL
+// renames across databases.
 func (s *Schema) Rename(from, to string) {
 	s.requireTable("Rename", from)
 	s.requireTable("Rename", to)

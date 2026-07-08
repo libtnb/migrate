@@ -118,6 +118,9 @@ func validateSchema(name string, s *Schema) error {
 	checkTablePK := func(def *tableDef) {
 		nullable := make(map[string]bool, len(def.columns))
 		for _, c := range def.columns {
+			if _, dup := nullable[c.name]; dup {
+				errs = append(errs, fmt.Errorf("table %q declares column %q twice", def.name, c.name))
+			}
 			nullable[c.name] = c.nullable
 		}
 		for _, p := range def.primary {

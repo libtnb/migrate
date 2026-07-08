@@ -174,11 +174,13 @@ func Steps(n int) RollbackOption {
 	}
 }
 
-// Rollback reverses the most recent batch of migrations (or the given Steps)
-// in reverse application order. Migrations declared with WithDown run their
-// explicit down; the rest reverse their recorded operations automatically. A
-// migration whose operations discard information (Drop, DropColumn, Exec,
-// Run) fails with ErrIrreversible instead of guessing.
+// Rollback reverses the most recent batch of migrations in reverse
+// application order — everything the last Up applied, which after a first
+// deploy is every migration; use Steps(1) to undo just the newest one.
+// Migrations declared with WithDown run their explicit down; the rest
+// reverse their recorded operations automatically. A migration whose
+// operations discard information (Drop, DropColumn, Exec, Run) fails with
+// ErrIrreversible instead of guessing. Baselined rows are never touched.
 func (m *Migrator) Rollback(ctx context.Context, opts ...RollbackOption) error {
 	return m.rollback(ctx, resolveSpec(opts))
 }

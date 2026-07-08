@@ -225,7 +225,8 @@ type ForeignColumn struct {
 
 // Constrained adds the foreign key constraint, inferring the parent table
 // from the column name (user_id → users) unless one is given. The referenced
-// column is "id".
+// column is "id". The inferred name is bare: when the parent lives in another
+// schema, pass it explicitly (Constrained("crm.users")).
 func (fc *ForeignColumn) Constrained(table ...string) *ForeignColumn {
 	parent := optional(table, "")
 	if parent == "" {
