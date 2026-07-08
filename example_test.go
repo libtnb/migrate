@@ -8,7 +8,7 @@ import (
 	"log/slog"
 	"time"
 
-	"github.com/libtnb/migrate"
+	"github.com/go-rio/migrate"
 )
 
 // Each migration lives in a Go file of the application (conventionally a

@@ -1,12 +1,12 @@
 # migrate
 
-[![Doc](https://pkg.go.dev/badge/github.com/libtnb/migrate)](https://pkg.go.dev/github.com/libtnb/migrate)
-[![Go](https://img.shields.io/github/go-mod/go-version/libtnb/migrate)](https://go.dev/)
-[![Release](https://img.shields.io/github/release/libtnb/migrate.svg)](https://github.com/libtnb/migrate/releases)
-[![Test](https://github.com/libtnb/migrate/actions/workflows/test.yml/badge.svg)](https://github.com/libtnb/migrate/actions)
-[![Report Card](https://goreportcard.com/badge/github.com/libtnb/migrate)](https://goreportcard.com/report/github.com/libtnb/migrate)
-[![Stars](https://img.shields.io/github/stars/libtnb/migrate?style=flat)](https://github.com/libtnb/migrate)
-[![License](https://img.shields.io/github/license/libtnb/migrate)](https://opensource.org/license/MIT)
+[![Doc](https://pkg.go.dev/badge/github.com/go-rio/migrate)](https://pkg.go.dev/github.com/go-rio/migrate)
+[![Go](https://img.shields.io/github/go-mod/go-version/go-rio/migrate)](https://go.dev/)
+[![Release](https://img.shields.io/github/release/go-rio/migrate.svg)](https://github.com/go-rio/migrate/releases)
+[![Test](https://github.com/go-rio/migrate/actions/workflows/test.yml/badge.svg)](https://github.com/go-rio/migrate/actions)
+[![Report Card](https://goreportcard.com/badge/github.com/go-rio/migrate)](https://goreportcard.com/report/github.com/go-rio/migrate)
+[![Stars](https://img.shields.io/github/stars/go-rio/migrate?style=flat)](https://github.com/go-rio/migrate)
+[![License](https://img.shields.io/github/license/go-rio/migrate)](https://opensource.org/license/MIT)
 
 Database schema migrations written as Go code and compiled into your binary —
 no SQL files to ship, no CLI to install, no third-party dependencies.
@@ -92,8 +92,16 @@ if err := m.Up(ctx); err != nil {
 ## Installation
 
 ```bash
-go get github.com/libtnb/migrate
+go get github.com/go-rio/migrate
 ```
+
+> Moved from `github.com/libtnb/migrate` in v0.5.0 — part of the
+> [go-rio](https://github.com/go-rio) family alongside the
+> [rio](https://github.com/go-rio/rio) ORM. Releases up to v0.4.0 remain
+> installable from the old path; new releases ship here only. The advisory
+> lock namespace was renamed with the module, so avoid running migrations
+> concurrently from pre-v0.5.0 and post-v0.5.0 binaries during a rolling
+> upgrade.
 
 ## Writing migrations
 
@@ -411,5 +419,5 @@ migrator at the database directly or through a session-mode pool.
 
 ## License
 
-libtnb/migrate is released under the [MIT License](LICENSE), © 2026-now
+go-rio/migrate is released under the [MIT License](LICENSE), © 2026-now
 TreeNewBee.

@@ -1,3 +1,3 @@
-module github.com/libtnb/migrate
+module github.com/go-rio/migrate
 
 go 1.25.0

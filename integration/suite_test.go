@@ -1,4 +1,4 @@
-// Package integration exercises github.com/libtnb/migrate against real
+// Package integration exercises github.com/go-rio/migrate against real
 // databases. It lives in its own module so the parent stays free of
 // third-party dependencies. SQLite (pure Go) always runs; Postgres and MySQL
 // run when MIGRATE_POSTGRES_DSN / MIGRATE_MYSQL_DSN point at a server, as CI
@@ -12,7 +12,7 @@ import (
 	"fmt"
 	"testing"
 
-	"github.com/libtnb/migrate"
+	"github.com/go-rio/migrate"
 )
 
 // appSchema registers the reference migrations used across all engines.

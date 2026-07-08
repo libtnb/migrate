@@ -5,7 +5,7 @@ import (
 	"os"
 	"testing"
 
-	"github.com/libtnb/migrate"
+	"github.com/go-rio/migrate"
 
 	_ "github.com/go-sql-driver/mysql"
 )

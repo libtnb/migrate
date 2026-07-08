@@ -7,7 +7,7 @@ import (
 	"sync"
 	"testing"
 
-	"github.com/libtnb/migrate"
+	"github.com/go-rio/migrate"
 
 	_ "github.com/jackc/pgx/v5/stdlib"
 )

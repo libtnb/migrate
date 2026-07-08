@@ -250,7 +250,7 @@ func (mysqlDialect) typeSQL(c *columnDef) (string, error) {
 // migrators of different databases on one server do not exclude each other;
 // hashing keeps it under GET_LOCK's 64-character limit. Session locks release
 // automatically when the connection drops.
-const myLockName = "CONCAT('libtnb.migrate.', MD5(CONCAT(IFNULL(DATABASE(), ''), ':', ?)))"
+const myLockName = "CONCAT('go-rio.migrate.', MD5(CONCAT(IFNULL(DATABASE(), ''), ':', ?)))"
 
 func (mysqlDialect) lock(ctx context.Context, conn *sql.Conn, table string, timeout time.Duration) error {
 	// GET_LOCK counts whole seconds; round up so a sub-second timeout still

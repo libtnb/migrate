@@ -279,7 +279,7 @@ func (d postgresDialect) recreateEpilogue(def *tableDef) []statement {
 // unaffected. Session-level locks release automatically when the connection
 // drops, and unlike transaction-level ones they do not hold a snapshot that
 // would block CREATE INDEX CONCURRENTLY elsewhere.
-const pgLockKey = "hashtextextended('libtnb/migrate:' || current_database() || ':' || $1, 0)"
+const pgLockKey = "hashtextextended('go-rio/migrate:' || current_database() || ':' || $1, 0)"
 
 func (postgresDialect) lock(ctx context.Context, conn *sql.Conn, table string, timeout time.Duration) error {
 	deadline := time.Now().Add(timeout)

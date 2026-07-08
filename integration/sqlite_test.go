@@ -6,7 +6,7 @@ import (
 	"path/filepath"
 	"testing"
 
-	"github.com/libtnb/migrate"
+	"github.com/go-rio/migrate"
 	_ "modernc.org/sqlite" // pure-Go driver, keeps integration CGO-free
 )
 

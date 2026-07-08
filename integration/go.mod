@@ -1,11 +1,11 @@
-module github.com/libtnb/migrate/integration
+module github.com/go-rio/migrate/integration
 
 go 1.25.0
 
 require (
+	github.com/go-rio/migrate v0.0.0
 	github.com/go-sql-driver/mysql v1.9.3
 	github.com/jackc/pgx/v5 v5.7.5
-	github.com/libtnb/migrate v0.0.0
 	modernc.org/sqlite v1.53.0
 )
 
@@ -28,4 +28,4 @@ require (
 	modernc.org/memory v1.11.0 // indirect
 )
 
-replace github.com/libtnb/migrate => ../
+replace github.com/go-rio/migrate => ../
