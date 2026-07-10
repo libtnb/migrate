@@ -171,6 +171,63 @@ func TestPostgresRecreate(t *testing.T) {
 // Codex round 2: recreating a parent table referenced by child foreign keys
 // is impossible on Postgres (definition-level dependency). The failure must
 // be clean — transaction rolled back, original table and data intact.
+// Audit H5: DROP TABLE takes the table's triggers with it on Postgres too;
+// the rebuild must capture them (pg_get_triggerdef) and recreate them once
+// the rename lands, and they must keep firing.
+func TestPostgresRecreateKeepsTriggers(t *testing.T) {
+	ctx := context.Background()
+	db := openPostgres(t)
+	dropAll(t, db)
+	mustExec(t, db, "DROP TABLE IF EXISTS audit")
+
+	c := migrate.NewCollection()
+	c.Add("001_users", func(s *migrate.Schema) {
+		s.Create("users", func(t *migrate.Table) {
+			t.ID()
+			t.String("email")
+		})
+		s.Create("audit", func(t *migrate.Table) {
+			t.ID()
+			t.String("email")
+		})
+		s.Exec(`CREATE OR REPLACE FUNCTION users_audit_fn() RETURNS trigger AS $$
+			BEGIN INSERT INTO audit (email) VALUES (NEW.email); RETURN NEW; END $$ LANGUAGE plpgsql`)
+		s.Exec(`CREATE TRIGGER users_audit AFTER INSERT ON users FOR EACH ROW EXECUTE FUNCTION users_audit_fn()`)
+	}, migrate.WithDown(func(s *migrate.Schema) {}))
+	m, err := migrate.New(db, migrate.Postgres, migrate.WithCollection(c))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := m.Up(ctx); err != nil {
+		t.Fatalf("Up: %v", err)
+	}
+	mustExec(t, db, "INSERT INTO users (email) VALUES ('a@x.dev')")
+	if got := count(t, db, "SELECT COUNT(*) FROM audit"); got != 1 {
+		t.Fatalf("the trigger should audit inserts, got %d rows", got)
+	}
+
+	c.Add("002_unique_emails", func(s *migrate.Schema) {
+		s.Recreate("users", func(t *migrate.Table) {
+			t.ID()
+			t.String("email").Unique()
+		})
+	}, migrate.WithDown(func(s *migrate.Schema) {}))
+	if err := m.Up(ctx); err != nil {
+		t.Fatalf("Up with recreate: %v", err)
+	}
+
+	if got := count(t, db, `SELECT COUNT(*) FROM pg_trigger WHERE tgrelid = 'users'::regclass AND NOT tgisinternal`); got != 1 {
+		t.Fatalf("the trigger must survive the rebuild, got %d", got)
+	}
+	mustExec(t, db, "INSERT INTO users (email) VALUES ('b@x.dev')")
+	if got := count(t, db, "SELECT COUNT(*) FROM audit"); got != 2 {
+		t.Errorf("the recreated trigger should keep firing, got %d rows", got)
+	}
+	if _, err := db.Exec("INSERT INTO users (email) VALUES ('b@x.dev')"); err == nil {
+		t.Error("the rebuilt unique index should reject duplicates")
+	}
+}
+
 func TestPostgresRecreateReferencedParentFailsCleanly(t *testing.T) {
 	ctx := context.Background()
 	db := openPostgres(t)

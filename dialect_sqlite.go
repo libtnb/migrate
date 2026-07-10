@@ -54,7 +54,7 @@ func (d sqliteDialect) compile(op operation) ([]statement, error) {
 	case *recreateTable:
 		return compileRecreate(d, liteQ, true, func(from, to string) statement {
 			return sqlStatement("ALTER TABLE %s RENAME TO %s", liteQ.table(from), liteQ.ident(baseName(to)))
-		}, o.def)
+		}, d.listTriggers, o.def)
 	case *rawSQL:
 		return []statement{{sql: o.sql, args: o.args}}, nil
 	case *goFunc:
@@ -222,6 +222,18 @@ func (sqliteDialect) typeSQL(c *columnDef) (string, error) {
 	default:
 		return "", fmt.Errorf("migrate: sqlite: unsupported column kind for %q", c.name)
 	}
+}
+
+// listTriggers returns the CREATE TRIGGER statements attached to the table,
+// read from the sqlite_master of the table's schema. The stored SQL is the
+// original DDL, replayable verbatim as long as the table keeps its name.
+func (sqliteDialect) listTriggers(ctx context.Context, db DB, table string) ([]string, error) {
+	master := "sqlite_master"
+	if p := schemaPrefix(table); p != "" {
+		master = liteQ.ident(strings.TrimSuffix(p, ".")) + "." + master
+	}
+	return queryStrings(ctx, db,
+		"SELECT sql FROM "+master+" WHERE type = 'trigger' AND tbl_name = ? ORDER BY name", baseName(table))
 }
 
 func (sqliteDialect) lock(context.Context, *sql.Conn, string, time.Duration) error { return nil }

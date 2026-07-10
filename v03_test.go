@@ -137,8 +137,10 @@ func TestRecreateCopyFromAndGenerated(t *testing.T) {
 )`,
 		// The generated column fills itself; age_years copies via the cast.
 		`INSERT INTO "events__migrate_new" ("id", "age_years") SELECT "id", CAST(age AS INTEGER) FROM "events"`,
+		`-- capture the triggers of "events"`,
 		`DROP TABLE "events"`,
 		`ALTER TABLE "events__migrate_new" RENAME TO "events"`,
+		`-- recreate the captured triggers of "events"`,
 	}
 	assertSQL(t, got, want)
 }

@@ -23,11 +23,48 @@ func TestRecreateCompilesMoveAndCopy(t *testing.T) {
 	CONSTRAINT "users_team_id_foreign" FOREIGN KEY ("team_id") REFERENCES "teams" ("id")
 )`,
 		`INSERT INTO "users__migrate_new" ("id", "email") SELECT "id", "email" FROM "users"`,
+		`-- capture the triggers of "users"`,
 		`DROP TABLE "users"`,
 		`ALTER TABLE "users__migrate_new" RENAME TO "users"`,
 		`CREATE UNIQUE INDEX "users_email_unique" ON "users" ("email")`,
+		`-- recreate the captured triggers of "users"`,
 	}
 	assertSQL(t, got, want)
+}
+
+// Audit H5: DROP TABLE takes the table's triggers with it, and the rebuild
+// used to report success while audit and cascade triggers silently vanished.
+// The sequence must capture their DDL before the drop and replay it once the
+// rename restores the original name — the order the SQLite twelve-step ALTER
+// TABLE procedure prescribes.
+func TestRecreateReplaysCapturedTriggers(t *testing.T) {
+	for name, tc := range map[string]struct {
+		d       Dialect
+		capture string // fragment of the trigger-capture query
+	}{
+		"sqlite":   {SQLite, "type = 'trigger'"},
+		"postgres": {Postgres, "pg_trigger"},
+	} {
+		t.Run(name, func(t *testing.T) {
+			f := newFakeDB()
+			f.triggers = []string{"CREATE TRIGGER users_audit AFTER INSERT ON users BEGIN INSERT INTO audit (email) VALUES (new.email); END"}
+			c := NewCollection()
+			c.Add("001_rebuild", func(s *Schema) {
+				s.Recreate("users", func(t *Table) { t.ID() })
+			}, WithDown(func(s *Schema) {}))
+			m := testMigrator(t, f, tc.d, c)
+			if err := m.Up(context.Background()); err != nil {
+				t.Fatalf("Up: %v", err)
+			}
+			assertLogSequence(t, f.logged(), []string{
+				tc.capture, // capture runs before the drop
+				`DROP TABLE "users"`,
+				`RENAME TO "users"`,
+				"CREATE TRIGGER users_audit", // replay lands after the rename
+				"INSERT INTO \"schema_migrations\"",
+			})
+		})
+	}
 }
 
 func TestRecreateConstraintNamesUseFinalTable(t *testing.T) {

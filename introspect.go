@@ -207,6 +207,8 @@ func renderStatements(stmts []statement) []string {
 	out := make([]string, len(stmts))
 	for i, s := range stmts {
 		switch {
+		case s.fn != nil && s.desc != "":
+			out[i] = "-- " + s.desc + " (runs at migration time)"
 		case s.fn != nil:
 			out[i] = "-- Go function: not renderable, runs at migration time"
 		case len(s.args) > 0:
@@ -295,6 +297,13 @@ func (m *Migrator) Fresh(ctx context.Context) error {
 		if err != nil {
 			return err
 		}
+		// listTables sees only the current schema; a records table qualified
+		// into another one (WithTable("aux.schema_migrations")) must join the
+		// drop set explicitly, or it survives with every migration recorded
+		// and the Up below silently skips them all.
+		if !slices.Contains(tables, m.cfg.table) {
+			tables = append(tables, m.cfg.table)
+		}
 		dropped := 0
 		for len(tables) > 0 {
 			var remaining []string
@@ -311,6 +320,20 @@ func (m *Migrator) Fresh(ctx context.Context) error {
 				return fmt.Errorf("migrate: fresh: drop tables: %w", lastErr)
 			}
 			tables = remaining
+		}
+		// Belt and braces: a records table surviving somewhere the listing
+		// cannot see would turn the coming Up into a silent no-op over an
+		// empty database. Recreate it and require it to start empty.
+		if _, err := conn.ExecContext(ctx, m.d.ensureTableSQL(m.cfg.table)); err != nil {
+			return fmt.Errorf("migrate: fresh: recreate records table: %w", err)
+		}
+		var stale int
+		row := conn.QueryRowContext(ctx, fmt.Sprintf("SELECT COUNT(*) FROM %s", m.d.quoteIdent(m.cfg.table)))
+		if err := row.Scan(&stale); err != nil {
+			return fmt.Errorf("migrate: fresh: verify records table: %w", err)
+		}
+		if stale > 0 {
+			return fmt.Errorf("migrate: fresh: records table %q survived the drop with %d records; drop it manually, then retry", m.cfg.table, stale)
 		}
 		m.cfg.logger.Info("migrate: fresh dropped all tables", "tables", dropped)
 		return nil

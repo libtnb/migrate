@@ -59,7 +59,8 @@ if err := m.Up(ctx); err != nil {
   migration back — schema and bookkeeping together — and the next `Up` simply
   retries. There is no flag to `force` clear by hand. MySQL commits DDL
   implicitly and cannot be made atomic; failures there say exactly which
-  statement failed and that earlier DDL is already in effect.
+  statement failed and which statements are already committed — or that the
+  transaction rolled back cleanly when no DDL was involved.
 - **Safe under concurrency by default.** Replicas racing to migrate at deploy
   time are serialized with a session-level advisory lock (`pg_advisory_lock`,
   `GET_LOCK`) held on a dedicated connection — released by the database itself
@@ -211,9 +212,10 @@ comments with `t.Comment(...)`.
 
 What `ALTER TABLE` cannot express — on SQLite, any constraint change —
 `Recreate` can: declare the complete target table and the migrator rebuilds
-it around the data (create temporary → copy rows → drop old → rename →
-rebuild indexes), inside the migration's transaction on Postgres and SQLite,
-so a failure leaves the original table untouched. MySQL refuses to compile a
+it around the data (create temporary → copy rows → capture triggers → drop
+old → rename → rebuild indexes → recreate triggers), inside the migration's
+transaction on Postgres and SQLite, so a failure leaves the original table
+untouched. MySQL refuses to compile a
 `Recreate` — its implicit DDL commits would open a crash window with the live
 table dropped, and its native `ALTER TABLE` already changes types and
 constraints directly:
@@ -245,6 +247,12 @@ the old definition, so rolling back needs a `WithDown` (usually another
 `PRAGMA foreign_keys=ON` and child rows referencing the table, run the
 migration on a connection with enforcement off — enforcement is off by
 default in SQLite and most drivers.
+
+Triggers on the table — created through `Exec`, since the builder does not
+declare them — are captured at migration time and recreated verbatim after
+the rename; `DROP TABLE` would otherwise silently take them along. A trigger
+body the new shape breaks fails the replay and rolls the migration back:
+drop it with `Exec` before the `Recreate` and declare its successor after.
 
 There is deliberately no `Change()` for redefining a column's type in place.
 That API is where migration tools quietly lose modifiers, and SQLite cannot

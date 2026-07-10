@@ -48,6 +48,13 @@ type statement struct {
 	sql  string
 	args []any
 	fn   func(context.Context, DB) error
+	// desc labels an fn statement for plans and failure messages, which
+	// cannot render the function itself.
+	desc string
+	// ddl marks statements that end a transaction implicitly on engines
+	// without transactional DDL (MySQL): schema operations, and raw SQL not
+	// recognizably plain DML.
+	ddl bool
 }
 
 func sqlStatement(format string, a ...any) statement {
@@ -276,12 +283,21 @@ func declarationErrors(errs []error) error {
 
 // compileRecreate builds the move-and-copy sequence shared by every dialect:
 // create a temporary table with the target shape, copy the surviving rows,
-// drop the old table, rename into place, rebuild indexes. Constraints on the
-// temporary table are pinned to their conventional final names via
-// constraintBase, so nothing keeps a temporary name after the rename. Child
-// foreign keys referencing the table resolve by name again once the rename
-// lands — the same order Alembic uses for SQLite batch mode.
-func compileRecreate(d Dialect, q quoter, schemaOnIndex bool, renameSQL func(from, to string) statement, def *tableDef) ([]statement, error) {
+// capture the table's triggers, drop the old table, rename into place,
+// rebuild indexes, recreate the triggers. Constraints on the temporary table
+// are pinned to their conventional final names via constraintBase, so nothing
+// keeps a temporary name after the rename. Child foreign keys referencing the
+// table resolve by name again once the rename lands — the same order Alembic
+// uses for SQLite batch mode.
+//
+// DROP TABLE takes the table's triggers with it. They exist only in the live
+// database (created through Exec — the builder does not declare them), so
+// listTriggers reads their DDL at migration time just before the drop, and a
+// second opaque statement replays it verbatim once the rename restores the
+// original table name — the recreate-your-triggers step of SQLite's official
+// twelve-step ALTER TABLE procedure.
+func compileRecreate(d Dialect, q quoter, schemaOnIndex bool, renameSQL func(from, to string) statement,
+	listTriggers func(context.Context, DB, string) ([]string, error), def *tableDef) ([]statement, error) {
 	tmp := def.name + "__migrate_new"
 	tmpDef := &tableDef{
 		name:           tmp,
@@ -321,11 +337,50 @@ func compileRecreate(d Dialect, q quoter, schemaOnIndex bool, renameSQL func(fro
 		stmts = append(stmts, sqlStatement("INSERT INTO %s (%s) SELECT %s FROM %s",
 			q.table(tmp), q.idents(copyCols), strings.Join(copyExprs, ", "), q.table(def.name)))
 	}
+	var triggers []string
 	stmts = append(stmts,
+		statement{
+			desc: fmt.Sprintf("capture the triggers of %s", q.table(def.name)),
+			fn: func(ctx context.Context, db DB) error {
+				var err error
+				triggers, err = listTriggers(ctx, db, def.name)
+				return err
+			},
+		},
 		sqlStatement("DROP TABLE %s", q.table(def.name)),
 		renameSQL(tmp, def.name))
 	for _, idx := range append(inlineIndexes(def.columns), def.indexes...) {
 		stmts = append(stmts, statement{sql: createIndexSQL(q, def.name, idx, schemaOnIndex)})
 	}
+	stmts = append(stmts, statement{
+		desc: fmt.Sprintf("recreate the captured triggers of %s", q.table(def.name)),
+		fn: func(ctx context.Context, db DB) error {
+			for _, ddl := range triggers {
+				if _, err := db.ExecContext(ctx, ddl); err != nil {
+					return fmt.Errorf("%s: %w", describeStatement(statement{sql: ddl}), err)
+				}
+			}
+			return nil
+		},
+	})
 	return stmts, nil
+}
+
+// queryStrings collects a single string column into a slice, for the runtime
+// catalog reads inside opaque statements.
+func queryStrings(ctx context.Context, db DB, query string, args ...any) ([]string, error) {
+	rows, err := db.QueryContext(ctx, query, args...)
+	if err != nil {
+		return nil, err
+	}
+	defer func() { _ = rows.Close() }()
+	var out []string
+	for rows.Next() {
+		var s string
+		if err := rows.Scan(&s); err != nil {
+			return nil, err
+		}
+		out = append(out, s)
+	}
+	return out, rows.Err()
 }

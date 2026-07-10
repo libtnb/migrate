@@ -281,7 +281,7 @@ func (m *Migrator) runOne(ctx context.Context, conn *sql.Conn, mig *Migration, u
 	if mig.useTx {
 		err = m.runInTx(ctx, conn, stmts)
 	} else {
-		err = runStatements(ctx, conn, stmts)
+		_, err = runStatements(ctx, conn, stmts)
 	}
 	if err != nil {
 		return fmt.Errorf("migrate: %s %q: %w", verb, mig.name, err)
@@ -296,12 +296,12 @@ func (m *Migrator) runInTx(ctx context.Context, conn *sql.Conn, stmts []statemen
 	if err != nil {
 		return fmt.Errorf("begin transaction: %w", err)
 	}
-	if err := runStatements(ctx, tx, stmts); err != nil {
+	if failed, err := runStatements(ctx, tx, stmts); err != nil {
 		if rbErr := tx.Rollback(); rbErr != nil {
 			m.cfg.logger.Warn("migrate: rollback after failure", "error", rbErr)
 		}
 		if !m.d.transactionalDDL() {
-			err = fmt.Errorf("%w (%s DDL commits implicitly: earlier DDL statements of this migration are already in effect; reconcile the schema before retrying)", err, m.d.name())
+			err = fmt.Errorf("%w (%s)", err, implicitCommitNote(m.d.name(), stmts, failed))
 		}
 		return err
 	}
@@ -311,7 +311,35 @@ func (m *Migrator) runInTx(ctx context.Context, conn *sql.Conn, stmts []statemen
 	return nil
 }
 
-func runStatements(ctx context.Context, db DB, stmts []statement) error {
+// implicitCommitNote reports what a failed migration left behind on an engine
+// whose DDL ends transactions implicitly (MySQL). A DDL statement commits
+// everything before it — even when the DDL itself then fails — and statements
+// after one run in autocommit mode, committing one by one, so the ROLLBACK
+// above undid none of the executed prefix. Only a failure before the first
+// DDL leaves the database untouched. failed is the 0-based index of the
+// failing statement.
+func implicitCommitNote(dialect string, stmts []statement, failed int) string {
+	dirty := false
+	for _, s := range stmts[:min(failed+1, len(stmts))] {
+		if s.ddl {
+			dirty = true
+			break
+		}
+	}
+	if !dirty || failed == 0 {
+		return "the transaction rolled back: the database is unchanged by this migration"
+	}
+	span, verb := fmt.Sprintf("statements 1-%d", failed), "are"
+	if failed == 1 {
+		span, verb = "statement 1", "is"
+	}
+	return fmt.Sprintf("%s DDL commits implicitly: %s of this migration %s already committed — DML before a DDL commits with it, statements after one commit individually under autocommit — and the rollback undid none of it; reconcile the schema before retrying",
+		dialect, span, verb)
+}
+
+// runStatements executes the statements in order, returning the 0-based index
+// of the statement that failed alongside its error.
+func runStatements(ctx context.Context, db DB, stmts []statement) (int, error) {
 	for i, s := range stmts {
 		var err error
 		if s.fn != nil {
@@ -320,14 +348,17 @@ func runStatements(ctx context.Context, db DB, stmts []statement) error {
 			err = execErr
 		}
 		if err != nil {
-			return fmt.Errorf("statement %d/%d (%s): %w", i+1, len(stmts), describeStatement(s), err)
+			return i, fmt.Errorf("statement %d/%d (%s): %w", i+1, len(stmts), describeStatement(s), err)
 		}
 	}
-	return nil
+	return len(stmts), nil
 }
 
 func describeStatement(s statement) string {
 	if s.fn != nil {
+		if s.desc != "" {
+			return s.desc
+		}
 		return "Go function"
 	}
 	sql := strings.Join(strings.Fields(s.sql), " ")

@@ -202,9 +202,46 @@ func (m *Migration) compile(d Dialect, up bool) ([]statement, error) {
 		if err != nil {
 			return nil, fmt.Errorf("migration %q: %w", m.name, err)
 		}
+		if operationCommitsImplicitly(op) {
+			for i := range s {
+				s[i].ddl = true
+			}
+		}
 		stmts = append(stmts, s...)
 	}
 	return stmts, nil
+}
+
+// operationCommitsImplicitly reports whether an operation's statements end a
+// MySQL transaction implicitly, which decides what a failure note can claim
+// about the executed prefix. Schema operations always compile to DDL; raw SQL
+// is classified by its leading keyword; a Run function is taken at its
+// documented word — a data migration.
+func operationCommitsImplicitly(op operation) bool {
+	switch o := op.(type) {
+	case *rawSQL:
+		return !plainDMLSQL(o.sql)
+	case *goFunc:
+		return false
+	default:
+		return true
+	}
+}
+
+// plainDMLSQL recognizes raw statements that stay transactional on MySQL.
+// Anything else — CREATE, ALTER, DROP, TRUNCATE, unrecognized — is treated as
+// implicitly committing, so the failure note never understates what
+// persisted.
+func plainDMLSQL(sql string) bool {
+	fields := strings.Fields(sql)
+	if len(fields) == 0 {
+		return false
+	}
+	switch strings.ToUpper(fields[0]) {
+	case "INSERT", "UPDATE", "DELETE", "REPLACE", "SELECT", "WITH", "VALUES", "DO":
+		return true
+	}
+	return false
 }
 
 // Collection is an ordered, named set of migrations. The package-level Add

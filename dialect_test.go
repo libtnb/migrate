@@ -7,7 +7,8 @@ import (
 )
 
 // compileSchema runs fn against a fresh Schema and compiles the recorded
-// operations for d, returning the SQL texts.
+// operations for d, returning the SQL texts. Opaque fn statements render as
+// "-- " plus their description, so golden lists document them in place.
 func compileSchema(t *testing.T, d Dialect, fn func(*Schema)) []string {
 	t.Helper()
 	s := &Schema{}
@@ -22,6 +23,10 @@ func compileSchema(t *testing.T, d Dialect, fn func(*Schema)) []string {
 			t.Fatalf("compile: %v", err)
 		}
 		for _, st := range stmts {
+			if st.fn != nil {
+				out = append(out, "-- "+describeStatement(st))
+				continue
+			}
 			out = append(out, st.sql)
 		}
 	}

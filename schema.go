@@ -101,13 +101,22 @@ func (s *Schema) Table(table string, fn func(*Table)) {
 //	})
 //
 // It compiles to: create a temporary table with the new shape, copy the rows,
-// drop the old table, rename into place, rebuild indexes. On Postgres and
-// SQLite the whole sequence runs inside the migration's transaction, so a
-// failure leaves the original table untouched; combining Recreate with
-// WithoutTransaction is refused at compile time for the same reason. MySQL
-// refuses Recreate entirely: its implicit DDL commits would leave a crash
-// window with the live table dropped, and native ALTER TABLE already covers
-// every Recreate use case there.
+// capture the table's triggers, drop the old table, rename into place,
+// rebuild indexes, recreate the triggers. On Postgres and SQLite the whole
+// sequence runs inside the migration's transaction, so a failure leaves the
+// original table untouched; combining Recreate with WithoutTransaction is
+// refused at compile time for the same reason. MySQL refuses Recreate
+// entirely: its implicit DDL commits would leave a crash window with the live
+// table dropped, and native ALTER TABLE already covers every Recreate use
+// case there.
+//
+// Triggers on the table (created through Exec — the builder does not declare
+// them) would silently vanish with the dropped table; instead their DDL is
+// read at migration time and replayed verbatim after the rename. A trigger
+// whose body no longer matches the new shape fails the replay and rolls the
+// whole migration back — drop it with Exec before the Recreate and declare
+// its successor afterwards. Views are unaffected: SQLite leaves them in place
+// across the rebuild, and Postgres refuses to drop a table a view depends on.
 //
 // Dependent objects bound the rebuild. On Postgres a table referenced by
 // other tables' foreign keys or by views cannot be dropped, so its Recreate

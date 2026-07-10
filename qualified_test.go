@@ -52,10 +52,12 @@ func TestQualifiedRecreateStaysInSchema(t *testing.T) {
 	"name" VARCHAR(255) NOT NULL
 )`,
 		`INSERT INTO "aux"."items__migrate_new" ("id", "name") SELECT "id", "name" FROM "aux"."items"`,
+		`-- capture the triggers of "aux"."items"`,
 		`DROP TABLE "aux"."items"`,
 		`ALTER TABLE "aux"."items__migrate_new" RENAME TO "items"`,
 		// SQLite qualifies the index name, not the table.
 		`CREATE UNIQUE INDEX "aux"."items_name_unique" ON "items" ("name")`,
+		`-- recreate the captured triggers of "aux"."items"`,
 	}
 	assertSQL(t, got, want)
 }
@@ -78,6 +80,25 @@ func TestQualifiedRecordsTable(t *testing.T) {
 	}
 	if len(f.loggedContaining(`INSERT INTO "ops"."schema_migrations"`)) != 2 {
 		t.Error("bookkeeping should target the qualified records table")
+	}
+}
+
+// Audit M16: listTables sees only the current schema, so a records table
+// qualified into another schema survived Fresh with every migration still
+// recorded — the following Up then skipped everything and reported success
+// over an empty database.
+func TestFreshDropsQualifiedRecordsTable(t *testing.T) {
+	f := newFakeDB()
+	f.tables = []string{"users"}
+	m := testMigrator(t, f, Postgres, twoTables(), WithTable("aux.schema_migrations"))
+	if err := m.Fresh(t.Context()); err != nil {
+		t.Fatalf("Fresh: %v", err)
+	}
+	if len(f.loggedContaining(`DROP TABLE IF EXISTS "aux"."schema_migrations"`)) != 1 {
+		t.Errorf("the qualified records table must join the drop set, log:\n%s", strings.Join(f.logged(), "\n"))
+	}
+	if len(f.loggedContaining(`CREATE TABLE "users"`)) != 1 {
+		t.Error("migrations should re-apply from scratch")
 	}
 }
 

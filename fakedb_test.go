@@ -20,6 +20,7 @@ type fakeDB struct {
 	args     [][]driver.NamedValue
 	records  []record // rows served for records-table SELECTs
 	tables   []string // rows served for list-tables queries
+	triggers []string // rows served for trigger-capture queries
 	failOn   string   // substring that makes Exec/Query fail
 	failErr  error
 	denyLock bool // advisory lock attempts report "not acquired"
@@ -140,6 +141,14 @@ func (c *fakeConn) QueryContext(_ context.Context, query string, _ []driver.Name
 			rows[i] = []driver.Value{r.version, int64(r.batch), r.checksum, r.appliedAt}
 		}
 		return &fakeRows{cols: []string{"version", "batch", "checksum", "applied_at"}, rows: rows}, nil
+	case strings.Contains(query, "'trigger'"), strings.Contains(query, "pg_trigger"):
+		rows := make([][]driver.Value, len(c.db.triggers))
+		for i, tr := range c.db.triggers {
+			rows[i] = []driver.Value{tr}
+		}
+		return &fakeRows{cols: []string{"sql"}, rows: rows}, nil
+	case strings.Contains(query, "SELECT COUNT(*) FROM"):
+		return &fakeRows{cols: []string{"n"}, rows: [][]driver.Value{{int64(len(c.db.records))}}}, nil
 	case strings.Contains(query, "pg_tables"), strings.Contains(query, "information_schema.tables"),
 		strings.Contains(query, "sqlite_master"):
 		rows := make([][]driver.Value, len(c.db.tables))

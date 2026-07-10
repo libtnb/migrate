@@ -73,6 +73,19 @@ func TestAnalyzeSafetyFindings(t *testing.T) {
 			func(s *Schema) { s.Table("t", func(t *Table) { t.String("c").Default("x") }) },
 			"",
 		},
+		// Audit M20: a generated column computes its value for existing rows,
+		// so its NOT NULL add is safe — and it could not declare the Default
+		// the finding used to demand anyway.
+		"stored generated add is safe": {
+			"postgres",
+			func(s *Schema) { s.Table("t", func(t *Table) { t.String("full").StoredAs("first || ' ' || last") }) },
+			"",
+		},
+		"virtual generated add is safe": {
+			"sqlite",
+			func(s *Schema) { s.Table("t", func(t *Table) { t.String("full").VirtualAs("first || ' ' || last") }) },
+			"",
+		},
 		"index off postgres is quiet": {
 			"mysql",
 			func(s *Schema) { s.Table("t", func(t *Table) { t.Index("c") }) },
@@ -154,6 +167,26 @@ func TestSafetyAssuredSkipsAnalysis(t *testing.T) {
 	m := testMigrator(t, f, Postgres, c, WithSafety(SafetyStrict))
 	if err := m.Up(context.Background()); err != nil {
 		t.Fatalf("an Assured migration must pass strict safety: %v", err)
+	}
+}
+
+// Audit M20: SafetyStrict blocked NOT NULL generated adds with advice to add
+// a Default — which the declaration validator then rejects for generated
+// columns. The safe migration must pass without an Assured() escape hatch.
+func TestSafetyStrictAllowsGeneratedAddColumn(t *testing.T) {
+	f := newFakeDB()
+	c := NewCollection()
+	c.Add("001_full_name", func(s *Schema) {
+		s.Table("people", func(t *Table) {
+			t.String("full").StoredAs("first || ' ' || last")
+		})
+	})
+	m := testMigrator(t, f, Postgres, c, WithSafety(SafetyStrict))
+	if err := m.Up(context.Background()); err != nil {
+		t.Fatalf("a generated NOT NULL add is safe and must pass strict safety: %v", err)
+	}
+	if len(f.loggedContaining("ADD COLUMN")) != 1 {
+		t.Error("the migration should have run")
 	}
 }
 

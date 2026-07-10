@@ -309,6 +309,61 @@ func TestMySQLFailureExplainsImplicitCommit(t *testing.T) {
 	if err == nil || !strings.Contains(err.Error(), "commits implicitly") {
 		t.Fatalf("MySQL failures should explain implicit commits, got: %v", err)
 	}
+	// Audit M17: the note must name the committed prefix, not gesture at it.
+	if !strings.Contains(err.Error(), "statement 1 of this migration is already committed") {
+		t.Errorf("the note should name exactly what committed, got: %v", err)
+	}
+}
+
+// Audit M17: the implicit-commit note was gated on the dialect alone, so a
+// pure-DML data migration — which MySQL's transaction fully protects — failed
+// with instructions to reconcile schema damage that never happened.
+func TestMySQLPureDMLFailureReportsCleanRollback(t *testing.T) {
+	f := newFakeDB()
+	c := NewCollection()
+	c.Add("001_seed", func(s *Schema) {
+		s.Exec("INSERT INTO t (x) VALUES (1)")
+		s.Exec("INSERT INTO broken (x) VALUES (2)")
+	}, WithDown(func(s *Schema) {}))
+	f.fail("broken", errors.New("boom"))
+	err := testMigrator(t, f, MySQL, c).Up(context.Background())
+	if err == nil {
+		t.Fatal("Up should fail")
+	}
+	if strings.Contains(err.Error(), "commits implicitly") {
+		t.Errorf("a rolled-back DML migration must not claim implicit commits, got: %v", err)
+	}
+	if !strings.Contains(err.Error(), "unchanged") {
+		t.Errorf("the error should state the database is unchanged, got: %v", err)
+	}
+}
+
+// Audit M17: MySQL's implicit commit takes the DML before a DDL along with
+// it, and statements after one commit individually under autocommit — the
+// note must cover the whole executed prefix, not just "earlier DDL".
+func TestMySQLMixedFailureNamesCommittedPrefix(t *testing.T) {
+	f := newFakeDB()
+	c := NewCollection()
+	c.Add("001_mixed", func(s *Schema) {
+		s.Exec("INSERT INTO audit (op) VALUES ('start')") // committed with the DDL
+		s.Create("b", func(t *Table) { t.ID() })          // the implicit commit
+		s.Exec("INSERT INTO audit (op) VALUES ('mid')")   // autocommitted
+		s.Exec("INSERT INTO broken (x) VALUES (1)")
+	}, WithDown(func(s *Schema) {}))
+	f.fail("broken", errors.New("boom"))
+	err := testMigrator(t, f, MySQL, c).Up(context.Background())
+	if err == nil || !strings.Contains(err.Error(), "statements 1-3 of this migration are already committed") {
+		t.Fatalf("the note should cover the whole executed prefix, got: %v", err)
+	}
+
+	// A failure before any DDL ran leaves the database untouched, even in a
+	// migration that would have executed DDL later.
+	f2 := newFakeDB()
+	f2.fail("INSERT INTO audit", errors.New("boom"))
+	err = testMigrator(t, f2, MySQL, c).Up(context.Background())
+	if err == nil || strings.Contains(err.Error(), "commits implicitly") || !strings.Contains(err.Error(), "unchanged") {
+		t.Fatalf("failing before the first DDL leaves the database unchanged, got: %v", err)
+	}
 }
 
 func TestRunFunctionExecutesInTransaction(t *testing.T) {
@@ -553,6 +608,28 @@ func TestFreshDropsEverythingThenMigrates(t *testing.T) {
 		`CREATE TABLE "posts"`,
 		"INSERT INTO",
 	})
+}
+
+// Audit M16: if the records table somehow survives the drops (somewhere
+// listTables cannot see), the following Up would read its stale records and
+// skip every migration over an empty database. Fresh must notice and fail
+// instead of reporting success.
+func TestFreshFailsWhenRecordsTableSurvives(t *testing.T) {
+	f := newFakeDB()
+	f.tables = []string{"users"}
+	c := twoTables()
+	f.setRecords(
+		appliedRecord(t, c, Postgres, "001_users", 1),
+		appliedRecord(t, c, Postgres, "002_posts", 1),
+	) // the fake never clears records: the drop "misses" the table
+	m := testMigrator(t, f, Postgres, c)
+	err := m.Fresh(context.Background())
+	if err == nil || !strings.Contains(err.Error(), "survived the drop") {
+		t.Fatalf("Fresh over a surviving records table must fail loud, got: %v", err)
+	}
+	if len(f.loggedContaining("BEGIN")) != 0 {
+		t.Error("no migration may run against the stale records")
+	}
 }
 
 // Audit: a plain Rollback used to select batch-0 baseline rows once they

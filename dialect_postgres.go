@@ -46,7 +46,7 @@ func (d postgresDialect) compile(op operation) ([]statement, error) {
 	case *recreateTable:
 		stmts, err := compileRecreate(d, pgQ, false, func(from, to string) statement {
 			return sqlStatement("ALTER TABLE %s RENAME TO %s", pgQ.table(from), pgQ.ident(baseName(to)))
-		}, o.def)
+		}, d.listTriggers, o.def)
 		if err != nil {
 			return nil, err
 		}
@@ -239,6 +239,15 @@ func (postgresDialect) typeSQL(c *columnDef) (string, error) {
 func (postgresDialect) commentSQL(table string, c *columnDef) statement {
 	comment := strings.ReplaceAll(c.comment, "'", "''")
 	return sqlStatement("COMMENT ON COLUMN %s.%s IS '%s'", pgQ.table(table), pgQ.ident(c.name), comment)
+}
+
+// listTriggers returns the user triggers attached to the table as complete
+// CREATE TRIGGER statements. Internal triggers (foreign key enforcement)
+// belong to their constraints and rebuild with them.
+func (postgresDialect) listTriggers(ctx context.Context, db DB, table string) ([]string, error) {
+	return queryStrings(ctx, db,
+		"SELECT pg_get_triggerdef(oid) FROM pg_trigger WHERE tgrelid = $1::regclass AND NOT tgisinternal ORDER BY tgname",
+		pgQ.table(table))
 }
 
 // recreateEpilogue finishes a table swap: the rebuilt primary key kept the

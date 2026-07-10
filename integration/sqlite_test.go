@@ -230,6 +230,57 @@ func TestSQLiteRecreate(t *testing.T) {
 	}
 }
 
+// Audit H5: DROP TABLE takes the table's triggers with it, and Recreate used
+// to report success while audit triggers silently vanished. The rebuild must
+// capture and recreate them, and they must keep firing.
+func TestSQLiteRecreateKeepsTriggers(t *testing.T) {
+	ctx := context.Background()
+	db := openSQLite(t)
+
+	c := migrate.NewCollection()
+	c.Add("001_users", func(s *migrate.Schema) {
+		s.Create("users", func(t *migrate.Table) {
+			t.ID()
+			t.String("email")
+		})
+		s.Create("audit", func(t *migrate.Table) {
+			t.ID()
+			t.String("email")
+		})
+		s.Exec(`CREATE TRIGGER users_audit AFTER INSERT ON users
+			BEGIN INSERT INTO audit (email) VALUES (new.email); END`)
+	}, migrate.WithDown(func(s *migrate.Schema) {}))
+	m, err := migrate.New(db, migrate.SQLite, migrate.WithCollection(c))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := m.Up(ctx); err != nil {
+		t.Fatalf("Up: %v", err)
+	}
+	mustExec(t, db, "INSERT INTO users (email) VALUES ('a@x.dev')")
+	if got := count(t, db, "SELECT COUNT(*) FROM audit"); got != 1 {
+		t.Fatalf("the trigger should audit inserts, got %d rows", got)
+	}
+
+	c.Add("002_unique_emails", func(s *migrate.Schema) {
+		s.Recreate("users", func(t *migrate.Table) {
+			t.ID()
+			t.String("email").Unique()
+		})
+	}, migrate.WithDown(func(s *migrate.Schema) {}))
+	if err := m.Up(ctx); err != nil {
+		t.Fatalf("Up with recreate: %v", err)
+	}
+
+	if got := count(t, db, `SELECT COUNT(*) FROM sqlite_master WHERE type = 'trigger' AND tbl_name = 'users'`); got != 1 {
+		t.Fatalf("the trigger must survive the rebuild, got %d", got)
+	}
+	mustExec(t, db, "INSERT INTO users (email) VALUES ('b@x.dev')")
+	if got := count(t, db, "SELECT COUNT(*) FROM audit"); got != 2 {
+		t.Errorf("the recreated trigger should keep firing, got %d rows", got)
+	}
+}
+
 // Fresh drops every table — the drop loop unwinds foreign key dependencies
 // (this connection enforces them) — then reruns all migrations from scratch.
 func TestSQLiteFresh(t *testing.T) {
@@ -258,6 +309,55 @@ func TestSQLiteFresh(t *testing.T) {
 	}
 	if got := count(t, db, "SELECT COUNT(*) FROM schema_migrations"); got != 2 {
 		t.Errorf("all migrations should be re-recorded, got %d", got)
+	}
+}
+
+// Audit M16: Fresh only enumerated the current schema, so a records table
+// attached elsewhere survived with every migration recorded — Fresh reported
+// success over an empty database and the next Up had nothing to apply.
+func TestSQLiteFreshQualifiedRecordsTable(t *testing.T) {
+	ctx := context.Background()
+	dir := t.TempDir()
+	db, err := sql.Open("sqlite", "file:"+filepath.Join(dir, "main.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = db.Close() })
+	// A single connection so the ATTACH survives for the whole test.
+	db.SetMaxOpenConns(1)
+	if _, err := db.Exec("ATTACH DATABASE '" + filepath.Join(dir, "aux.db") + "' AS aux"); err != nil {
+		t.Fatalf("attach: %v", err)
+	}
+
+	c := migrate.NewCollection()
+	c.Add("001_users", func(s *migrate.Schema) {
+		s.Create("users", func(t *migrate.Table) { t.ID() })
+	})
+	m, err := migrate.New(db, migrate.SQLite, migrate.WithCollection(c),
+		migrate.WithTable("aux.schema_migrations"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := m.Up(ctx); err != nil {
+		t.Fatalf("Up: %v", err)
+	}
+	mustExec(t, db, "INSERT INTO users (id) VALUES (1)")
+
+	if err := m.Fresh(ctx); err != nil {
+		t.Fatalf("Fresh: %v", err)
+	}
+	if got := count(t, db, "SELECT COUNT(*) FROM users"); got != 0 {
+		t.Errorf("users should be recreated empty, got %d rows", got)
+	}
+	if got := count(t, db, "SELECT COUNT(*) FROM aux.schema_migrations"); got != 1 {
+		t.Errorf("the records table should hold exactly the fresh run, got %d rows", got)
+	}
+	// The state is coherent: another Up finds nothing to do and users stays.
+	if err := m.Up(ctx); err != nil {
+		t.Fatalf("second Up: %v", err)
+	}
+	if got := count(t, db, "SELECT COUNT(*) FROM users"); got != 0 {
+		t.Errorf("users must still exist and be empty, got %d", got)
 	}
 }
 
