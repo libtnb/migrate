@@ -638,8 +638,6 @@ func TestFreshDropsEverythingThenMigrates(t *testing.T) {
 			t.Errorf("expected a cascade drop of %s", table)
 		}
 	}
-	// After dropping, the full migration run happens: table recreated,
-	// both migrations applied and recorded.
 	assertLogSequence(t, f.logged(), []string{
 		"DROP TABLE IF EXISTS",
 		"CREATE TABLE IF NOT EXISTS \"schema_migrations\"",

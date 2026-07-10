@@ -32,11 +32,10 @@ func TestRecreateCompilesMoveAndCopy(t *testing.T) {
 	assertSQL(t, got, want)
 }
 
-// Audit H5: DROP TABLE takes the table's triggers with it, and the rebuild
-// used to report success while audit and cascade triggers silently vanished.
-// The sequence must capture their DDL before the drop and replay it once the
-// rename restores the original name — the order the SQLite twelve-step ALTER
-// TABLE procedure prescribes.
+// Audit H5: DROP TABLE takes the table's triggers with it, so the sequence
+// must capture their DDL before the drop and replay it once the rename
+// restores the original name — the order the SQLite twelve-step ALTER TABLE
+// procedure prescribes.
 func TestRecreateReplaysCapturedTriggers(t *testing.T) {
 	for name, tc := range map[string]struct {
 		d       Dialect

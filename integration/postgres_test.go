@@ -168,9 +168,6 @@ func TestPostgresRecreate(t *testing.T) {
 	mustExec(t, db, "DROP TABLE IF EXISTS counters")
 }
 
-// Codex round 2: recreating a parent table referenced by child foreign keys
-// is impossible on Postgres (definition-level dependency). The failure must
-// be clean — transaction rolled back, original table and data intact.
 // Audit H5: DROP TABLE takes the table's triggers with it on Postgres too;
 // the rebuild must capture them (pg_get_triggerdef) and recreate them once
 // the rename lands, and they must keep firing.
@@ -228,6 +225,9 @@ func TestPostgresRecreateKeepsTriggers(t *testing.T) {
 	}
 }
 
+// Codex round 2: recreating a parent table referenced by child foreign keys
+// is impossible on Postgres (definition-level dependency). The failure must
+// be clean — transaction rolled back, original table and data intact.
 func TestPostgresRecreateReferencedParentFailsCleanly(t *testing.T) {
 	ctx := context.Background()
 	db := openPostgres(t)

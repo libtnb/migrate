@@ -31,12 +31,10 @@ func TestSQLiteDataMigration(t *testing.T) {
 }
 func TestSQLiteBaseline(t *testing.T) { runBaseline(t, openSQLite(t), migrate.SQLite) }
 
-// Audit LB11: SQLite's advisory lock is a no-op, and a racing migrator used
-// to blow up with a raw "table already exists" from halfway through. The
-// single-writer model plus record-first bookkeeping must arbitrate the race
-// on the records table: losers either wait and find nothing to do, or fail
-// with rerun guidance before touching the schema — never with a raw driver
-// error, and never leaving partial state behind.
+// Audit LB11: SQLite's advisory lock is a no-op, so the single-writer model
+// plus record-first bookkeeping must arbitrate the race on the records table:
+// losers either wait and find nothing to do, or fail with rerun guidance
+// before touching the schema — never a raw driver error, never partial state.
 func TestSQLiteConcurrentMigrators(t *testing.T) {
 	ctx := context.Background()
 	dsn := "file:" + filepath.Join(t.TempDir(), "app.db") + "?_pragma=busy_timeout(5000)"

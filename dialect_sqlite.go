@@ -110,8 +110,7 @@ func (d sqliteDialect) compileAlter(op *alterTable) ([]statement, error) {
 				return nil, fmt.Errorf("migrate: sqlite cannot add auto-increment column %q to existing table %q; declare it in Create, or use Schema.Recreate", c.col.name, op.table)
 			}
 			if c.col.generatedExpr != "" && !c.col.generatedVirtual {
-				// ALTER TABLE ADD COLUMN ... STORED fails on any populated
-				// table — an error tests on empty databases never see.
+				// ALTER TABLE ADD COLUMN ... STORED fails on any populated table.
 				return nil, fmt.Errorf("migrate: sqlite cannot add STORED generated column %q to existing table %q; use VirtualAs, or Schema.Recreate", c.col.name, op.table)
 			}
 			if c.col.useCurrent || c.col.defaultExpr != "" {

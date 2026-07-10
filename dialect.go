@@ -79,8 +79,7 @@ func (q quoter) idents(names []string) string {
 
 // table quotes a possibly schema-qualified table name: dots separate path
 // segments, each quoted on its own ("analytics.events" → "analytics"."events").
-// Table names therefore cannot contain literal dots — the standard trade-off
-// every schema-aware tool makes.
+// Table names therefore cannot contain literal dots.
 func (q quoter) table(name string) string {
 	segs := strings.Split(name, ".")
 	for i, s := range segs {
