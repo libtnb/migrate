@@ -110,8 +110,12 @@ func TestPostgresRecreate(t *testing.T) {
 	ctx := context.Background()
 	db := openPostgres(t)
 	dropAll(t, db)
-	if _, err := db.Exec("DROP TABLE IF EXISTS counters"); err != nil {
-		t.Fatal(err)
+	// orders and counters are unique to this test; dropAll only clears the
+	// shared tables, so drop any residue here to stay idempotent across runs.
+	for _, table := range []string{"orders", "counters"} {
+		if _, err := db.Exec("DROP TABLE IF EXISTS " + table); err != nil {
+			t.Fatalf("drop %s: %v", table, err)
+		}
 	}
 
 	c := migrate.NewCollection()
@@ -165,7 +169,9 @@ func TestPostgresRecreate(t *testing.T) {
 	if got := count(t, db, "SELECT MAX(id) FROM counters"); got != 3 {
 		t.Errorf("the new row should take id 3, max = %d", got)
 	}
-	mustExec(t, db, "DROP TABLE IF EXISTS counters")
+	for _, table := range []string{"orders", "counters"} {
+		mustExec(t, db, "DROP TABLE IF EXISTS "+table)
+	}
 }
 
 // Audit H5: DROP TABLE takes the table's triggers with it on Postgres too;

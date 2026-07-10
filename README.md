@@ -1,11 +1,9 @@
 # migrate
 
-[![Doc](https://pkg.go.dev/badge/github.com/go-rio/migrate)](https://pkg.go.dev/github.com/go-rio/migrate)
+[![Doc](https://pkg.go.dev/badge/github.com/go-rio/migrate.svg)](https://pkg.go.dev/github.com/go-rio/migrate)
 [![Go](https://img.shields.io/github/go-mod/go-version/go-rio/migrate)](https://go.dev/)
 [![Release](https://img.shields.io/github/release/go-rio/migrate.svg)](https://github.com/go-rio/migrate/releases)
-[![Test](https://github.com/go-rio/migrate/actions/workflows/test.yml/badge.svg)](https://github.com/go-rio/migrate/actions)
-[![Report Card](https://goreportcard.com/badge/github.com/go-rio/migrate)](https://goreportcard.com/report/github.com/go-rio/migrate)
-[![Stars](https://img.shields.io/github/stars/go-rio/migrate?style=flat)](https://github.com/go-rio/migrate)
+[![Test](https://github.com/go-rio/migrate/actions/workflows/test.yml/badge.svg)](https://github.com/go-rio/migrate/actions/workflows/test.yml)
 [![License](https://img.shields.io/github/license/go-rio/migrate)](https://opensource.org/license/MIT)
 
 Database schema migrations written as Go code and compiled into your binary: no SQL files to ship, no CLI to install, no third-party dependencies.
