@@ -64,7 +64,11 @@ if err := m.Up(ctx); err != nil {
 - **Safe under concurrency by default.** Replicas racing to migrate at deploy
   time are serialized with a session-level advisory lock (`pg_advisory_lock`,
   `GET_LOCK`) held on a dedicated connection — released by the database itself
-  if a migrator crashes, so a killed pod never wedges the next deploy. Opt out
+  if a migrator crashes, so a killed pod never wedges the next deploy. SQLite
+  has no advisory lock; its single-writer file arbitrates instead: each
+  migration records itself as its transaction's first write, so a racer that
+  loses fails cleanly on the records table — before touching the schema —
+  with guidance to rerun, never with half a migration applied. Opt out
   with `WithoutLock` when a deploy job already guarantees a single runner.
 - **Tamper detection.** Every applied migration records a checksum of the SQL
   it compiled to. If a migration changes after it ran, `Up` warns (or fails,
@@ -393,7 +397,7 @@ tables (with the `CONCURRENTLY` / `NOT VALID` escape routes in the message).
 | | PostgreSQL | MySQL | SQLite |
 |---|---|---|---|
 | DDL in transactions | yes — failed migrations roll back completely | no — DDL commits implicitly | yes — failed migrations roll back completely |
-| Advisory lock | `pg_advisory_lock`, session-level | `GET_LOCK`, session-level | not needed (single-writer file) |
+| Advisory lock | `pg_advisory_lock`, session-level | `GET_LOCK`, session-level | none — the single-writer file and record-first bookkeeping arbitrate |
 | Altering constraints | full support | full support | compile-time error with guidance |
 
 Each migration runs in its own transaction by default. On MySQL the

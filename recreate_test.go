@@ -61,8 +61,12 @@ func TestRecreateReplaysCapturedTriggers(t *testing.T) {
 				`DROP TABLE "users"`,
 				`RENAME TO "users"`,
 				"CREATE TRIGGER users_audit", // replay lands after the rename
-				"INSERT INTO \"schema_migrations\"",
 			})
+			// The bookkeeping row is written in the same transaction; where
+			// in it is dialect business (SQLite records first, see LB11).
+			if len(f.loggedContaining(`INSERT INTO "schema_migrations"`)) != 1 {
+				t.Error("the migration must be recorded")
+			}
 		})
 	}
 }

@@ -15,8 +15,11 @@ import (
 // foreign keys and primary keys compiles to a clear error rather than
 // silently skipping the change — declare them when creating the table, or
 // change them with Schema.Recreate, which rebuilds the table while keeping
-// its rows. Advisory locking is a no-op — the database file itself
-// serializes writers.
+// its rows. Advisory locking is a no-op: the single-writer database file
+// serializes the migration transactions themselves, and each migration
+// records itself as its transaction's first write, so a racing migrator
+// loses on the records table — cleanly, before touching the schema — rather
+// than halfway through with "already exists".
 var SQLite Dialect = sqliteDialect{}
 
 type sqliteDialect struct{}

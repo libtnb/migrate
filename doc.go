@@ -46,7 +46,9 @@
 //
 // Concurrent migrators (replicas racing at deploy time) are serialized with a
 // session-level advisory lock on Postgres and MySQL, which the database
-// releases automatically if a migrator crashes. A failed migration rolls back
+// releases automatically if a migrator crashes; on SQLite the single-writer
+// file arbitrates instead, and a racer that loses fails cleanly on the
+// records table with guidance to rerun. A failed migration rolls back
 // with its transaction on Postgres and SQLite and is never half-recorded;
 // there is no "dirty" state to clear by hand. MySQL commits DDL implicitly
 // and cannot offer that atomicity — failures there report exactly which

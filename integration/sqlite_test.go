@@ -4,6 +4,8 @@ import (
 	"context"
 	"database/sql"
 	"path/filepath"
+	"strings"
+	"sync"
 	"testing"
 
 	"github.com/go-rio/migrate"
@@ -28,6 +30,85 @@ func TestSQLiteDataMigration(t *testing.T) {
 	runDataMigration(t, openSQLite(t), migrate.SQLite)
 }
 func TestSQLiteBaseline(t *testing.T) { runBaseline(t, openSQLite(t), migrate.SQLite) }
+
+// Audit LB11: SQLite's advisory lock is a no-op, and a racing migrator used
+// to blow up with a raw "table already exists" from halfway through. The
+// single-writer model plus record-first bookkeeping must arbitrate the race
+// on the records table: losers either wait and find nothing to do, or fail
+// with rerun guidance before touching the schema — never with a raw driver
+// error, and never leaving partial state behind.
+func TestSQLiteConcurrentMigrators(t *testing.T) {
+	ctx := context.Background()
+	dsn := "file:" + filepath.Join(t.TempDir(), "app.db") + "?_pragma=busy_timeout(5000)"
+
+	collection := func() *migrate.Collection {
+		c := migrate.NewCollection()
+		for _, table := range []string{"users", "posts", "tags"} {
+			c.Add("00"+table, func(s *migrate.Schema) {
+				s.Create(table, func(t *migrate.Table) { t.ID() })
+			})
+		}
+		return c
+	}
+
+	const racers = 8
+	dbs := make([]*sql.DB, racers)
+	for i := range dbs {
+		db, err := sql.Open("sqlite", dsn)
+		if err != nil {
+			t.Fatalf("open sqlite: %v", err)
+		}
+		t.Cleanup(func() { _ = db.Close() })
+		dbs[i] = db
+	}
+
+	errs := make([]error, racers)
+	var wg sync.WaitGroup
+	for i := range racers {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			m, err := migrate.New(dbs[i], migrate.SQLite, migrate.WithCollection(collection()))
+			if err != nil {
+				errs[i] = err
+				return
+			}
+			errs[i] = m.Up(ctx)
+		}()
+	}
+	wg.Wait()
+
+	winners := 0
+	for i, err := range errs {
+		if err == nil {
+			winners++
+			continue
+		}
+		if !strings.Contains(err.Error(), "another migrator") {
+			t.Errorf("racer %d leaked a raw race error: %v", i, err)
+		}
+	}
+	if winners == 0 {
+		t.Error("at least one racer must win")
+	}
+
+	// The end state is coherent regardless of who won.
+	for _, table := range []string{"users", "posts", "tags"} {
+		if got := count(t, dbs[0], "SELECT COUNT(*) FROM "+table); got != 0 {
+			t.Errorf("%s should exist and be empty, got %d", table, got)
+		}
+	}
+	if got := count(t, dbs[0], "SELECT COUNT(*) FROM schema_migrations"); got != 3 {
+		t.Errorf("each migration must be recorded exactly once, got %d", got)
+	}
+	m, err := migrate.New(dbs[0], migrate.SQLite, migrate.WithCollection(collection()))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := m.Up(ctx); err != nil {
+		t.Fatalf("a rerun after the race must be a clean no-op: %v", err)
+	}
+}
 
 // An Integer AutoIncrement column assigns ids on insert like ID does.
 func TestSQLiteAutoIncrement(t *testing.T) {

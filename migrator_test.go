@@ -394,6 +394,46 @@ func TestSQLiteSkipsLocking(t *testing.T) {
 	}
 }
 
+// Audit LB11: SQLite has no advisory lock — its single-writer model
+// serializes the migration transactions themselves. Recording the migration
+// before its statements makes the bookkeeping row the transaction's first
+// write, so a lost race fails on the records table's primary key before any
+// schema statement runs, and that failure translates to guidance instead of
+// leaking a raw "already exists" from halfway through.
+func TestSQLiteRecordsFirstAndTranslatesLostRace(t *testing.T) {
+	f := newFakeDB()
+	m := testMigrator(t, f, SQLite, twoTables())
+	if err := m.Up(context.Background()); err != nil {
+		t.Fatalf("Up: %v", err)
+	}
+	assertLogSequence(t, f.logged(), []string{
+		"BEGIN", `INSERT INTO "schema_migrations"`, `CREATE TABLE "users"`, "COMMIT",
+		"BEGIN", `INSERT INTO "schema_migrations"`, `CREATE TABLE "posts"`, "COMMIT",
+	})
+
+	// A racer that lost gets guidance, not the raw constraint error.
+	f2 := newFakeDB()
+	f2.fail(`INSERT INTO "schema_migrations"`, errors.New("UNIQUE constraint failed: schema_migrations.version"))
+	err := testMigrator(t, f2, SQLite, twoTables()).Up(context.Background())
+	if err == nil || !strings.Contains(err.Error(), "another migrator") || !strings.Contains(err.Error(), "rerun") {
+		t.Fatalf("a lost race must translate to rerun guidance, got: %v", err)
+	}
+	if len(f2.loggedContaining(`CREATE TABLE "`)) != 0 {
+		t.Error("no schema statement may run after losing the race")
+	}
+	if len(f2.loggedContaining("ROLLBACK")) != 1 {
+		t.Error("the losing transaction must roll back")
+	}
+
+	// A genuine bookkeeping failure that is not a duplicate key stays raw.
+	f3 := newFakeDB()
+	f3.fail(`INSERT INTO "schema_migrations"`, errors.New("disk I/O error"))
+	err = testMigrator(t, f3, SQLite, twoTables()).Up(context.Background())
+	if err == nil || strings.Contains(err.Error(), "another migrator") {
+		t.Fatalf("only duplicate-key failures speak of racing, got: %v", err)
+	}
+}
+
 func TestPlanRendersWithoutExecuting(t *testing.T) {
 	f := newFakeDB()
 	c := twoTables()

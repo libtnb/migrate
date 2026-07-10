@@ -275,11 +275,23 @@ func (m *Migrator) runOne(ctx context.Context, conn *sql.Conn, mig *Migration, u
 	if err != nil {
 		return err
 	}
-	stmts = append(stmts, bookkeep)
+	arbiter := -1
+	if up && mig.useTx && m.d.name() == "sqlite" {
+		// SQLite has no advisory lock; its single-writer model serializes the
+		// migration transactions themselves. Recording first makes the
+		// bookkeeping row the transaction's first write: a racing migrator
+		// waits there for the write lock, then loses on the records table's
+		// primary key before any schema statement runs — instead of blowing
+		// up with "already exists" halfway through.
+		stmts = append([]statement{bookkeep}, stmts...)
+		arbiter = 0
+	} else {
+		stmts = append(stmts, bookkeep)
+	}
 
 	start := time.Now()
 	if mig.useTx {
-		err = m.runInTx(ctx, conn, stmts)
+		err = m.runInTx(ctx, conn, stmts, arbiter)
 	} else {
 		_, err = runStatements(ctx, conn, stmts)
 	}
@@ -291,7 +303,10 @@ func (m *Migrator) runOne(ctx context.Context, conn *sql.Conn, mig *Migration, u
 	return nil
 }
 
-func (m *Migrator) runInTx(ctx context.Context, conn *sql.Conn, stmts []statement) error {
+// runInTx executes the statements in one transaction. arbiter, when not -1,
+// is the index of a record-first bookkeeping statement whose duplicate-key
+// failure means another migrator applied this migration concurrently.
+func (m *Migrator) runInTx(ctx context.Context, conn *sql.Conn, stmts []statement, arbiter int) error {
 	tx, err := conn.BeginTx(ctx, nil)
 	if err != nil {
 		return fmt.Errorf("begin transaction: %w", err)
@@ -300,7 +315,10 @@ func (m *Migrator) runInTx(ctx context.Context, conn *sql.Conn, stmts []statemen
 		if rbErr := tx.Rollback(); rbErr != nil {
 			m.cfg.logger.Warn("migrate: rollback after failure", "error", rbErr)
 		}
-		if !m.d.transactionalDDL() {
+		switch {
+		case failed == arbiter && strings.Contains(err.Error(), "UNIQUE constraint failed"):
+			err = fmt.Errorf("%w (another migrator applied this migration concurrently; this transaction rolled back before touching the schema — rerun to verify nothing is pending)", err)
+		case !m.d.transactionalDDL():
 			err = fmt.Errorf("%w (%s)", err, implicitCommitNote(m.d.name(), stmts, failed))
 		}
 		return err
