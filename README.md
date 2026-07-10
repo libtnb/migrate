@@ -8,14 +8,14 @@
 [![Stars](https://img.shields.io/github/stars/go-rio/migrate?style=flat)](https://github.com/go-rio/migrate)
 [![License](https://img.shields.io/github/license/go-rio/migrate)](https://opensource.org/license/MIT)
 
-Database schema migrations written as Go code and compiled into your binary —
-no SQL files to ship, no CLI to install, no third-party dependencies.
+Database schema migrations written as Go code and compiled into your binary: no SQL files to ship, no CLI to install, no third-party dependencies.
 
-A migration declares its changes once, on a fluent schema builder. Because the
-declaration is data rather than opaque SQL, one declaration gives you all of
-this: dialect-specific SQL for PostgreSQL, MySQL and SQLite; an automatic
-rollback with no hand-written down migration; a reviewable dry-run plan; and a
-checksum that catches migrations edited after they ran.
+A migration declares its changes once on a fluent schema builder. One declaration produces:
+
+- Dialect-specific SQL for PostgreSQL, MySQL, and SQLite.
+- Automatic rollback with no hand-written down migration.
+- A reviewable dry-run plan.
+- A checksum that detects migrations edited after they ran.
 
 ```go
 func init() {
@@ -44,55 +44,18 @@ if err := m.Up(ctx); err != nil {
 
 ## Features
 
-- **Migrations are code.** Each migration is a Go file that registers itself
-  in `init`; `go build` packages the entire migration history into the binary.
-  Deploying the binary deploys the migrations — nothing to copy, embed or
-  mount, and a broken migration is a compile error, not a runtime surprise.
-- **Automatic rollbacks.** `Rollback` reverses the recorded operations in
-  reverse order: a created table drops, a rename renames back, an added index
-  disappears before the column it covers. Operations that discard information
-  (dropping tables or columns, raw SQL, Go functions) refuse to guess: rolling
-  them back requires an explicit `WithDown`, and fails with `ErrIrreversible`
-  otherwise.
-- **No dirty state, ever.** Each migration row is written atomically with the
-  migration itself. On PostgreSQL and SQLite a failure rolls the whole
-  migration back — schema and bookkeeping together — and the next `Up` simply
-  retries. There is no flag to `force` clear by hand. MySQL commits DDL
-  implicitly and cannot be made atomic; failures there say exactly which
-  statement failed and which statements are already committed — or that the
-  transaction rolled back cleanly when no DDL was involved.
-- **Safe under concurrency by default.** Replicas racing to migrate at deploy
-  time are serialized with a session-level advisory lock (`pg_advisory_lock`,
-  `GET_LOCK`) held on a dedicated connection — released by the database itself
-  if a migrator crashes, so a killed pod never wedges the next deploy. SQLite
-  has no advisory lock; its single-writer file arbitrates instead: each
-  migration records itself as its transaction's first write, so a racer that
-  loses fails cleanly on the records table — before touching the schema —
-  with guidance to rerun, never with half a migration applied. Opt out
-  with `WithoutLock` when a deploy job already guarantees a single runner.
-- **Tamper detection.** Every applied migration records a checksum of the SQL
-  it compiled to. If a migration changes after it ran, `Up` warns (or fails,
-  under `WithStrictChecksum`), `Status` reports the drift, and `Repair`
-  re-records current checksums after a reviewed change.
-- **Repeatable migrations.** Views, stored functions, triggers and reference
-  data registered with `AddRepeatable` re-run whenever their declaration
-  changes — edit the definition in place instead of writing
-  `create_view_v2, _v3, …` migrations. They run after all versioned
-  migrations; rollbacks never touch them.
-- **Reviewable before it runs.** `Plan` renders the SQL of pending migrations
-  against a live database; `Collection.SQL` renders a whole collection offline
-  for DBA review with no database at all; `PlanRollback` previews a rollback.
-- **Dialects that fail loud, not silent.** The builder compiles to each
-  engine's best-practice types (`JSONB`, `TIMESTAMPTZ`, identity columns on
-  Postgres; `DATETIME(6)`, native `ENUM` on MySQL). Where an engine cannot do
-  something — SQLite altering constraints — compiling returns a clear error
-  instead of silently skipping the change.
-- **Batch-aware history.** Each `Up` run is one batch; `Rollback(ctx, n)`
-  undoes exactly n migrations, `RollbackBatch` undoes everything the last
-  `Up` applied, `Reset` undoes everything ever. `Baseline` adopts a
-  pre-existing database without executing anything.
-- **Zero dependencies.** Only `database/sql` and the standard library: you
-  pass in the `*sql.DB` you already have, with whatever driver you chose.
+| Feature | Behavior |
+|---|---|
+| Migrations are code | One Go file per migration, self-registered in `init`; `go build` packages the full history into the binary. A broken migration is a compile error. |
+| Automatic rollbacks | `Rollback` reverses recorded operations in reverse order (e.g. an added index drops before its column). Information-discarding operations — dropping tables/columns, raw SQL, Go functions — need an explicit `WithDown`, else fail with `ErrIrreversible`. |
+| No dirty state | The migration row is written atomically with the migration; on Postgres and SQLite a failure rolls it fully back and the next `Up` retries. No `force` flag. MySQL commits DDL implicitly, so failures name the failing statement and those already committed, or report a clean rollback when no DDL ran. |
+| Concurrency-safe | A session-level advisory lock on a dedicated connection serializes racing replicas and is released by the database on crash. SQLite has none: each migration's first write is its own records row, so a losing racer fails on the records table before touching the schema, with rerun guidance. Opt out with `WithoutLock`. |
+| Tamper detection | Each applied migration records a checksum of its compiled SQL. On drift, `Up` warns (or fails under `WithStrictChecksum`), `Status` reports it, and `Repair` re-records after review. |
+| Repeatable migrations | `AddRepeatable` re-runs views, functions, triggers, and reference data when their declaration changes (see below). |
+| Reviewable | `Plan` renders pending SQL against a live database; `Collection.SQL` renders a collection offline with no database; `PlanRollback` previews a rollback. |
+| Dialect types | Compiles to each engine's best-practice types: `JSONB`, `TIMESTAMPTZ`, identity columns on Postgres; `DATETIME(6)`, native `ENUM` on MySQL. Unsupported operations fail at compile time, not silently. |
+| Batch history | Each `Up` is one batch; `Rollback`, `RollbackBatch`, `Reset`, and `Baseline` manage history (see below). |
+| Zero dependencies | Only `database/sql` and the standard library; pass in your own `*sql.DB` and driver. |
 
 ## Installation
 
@@ -110,8 +73,7 @@ go get github.com/go-rio/migrate
 
 ## Writing migrations
 
-The conventional layout is a `migrations` package, one file per migration,
-imported for effect from `main`:
+Conventional layout: a `migrations` package, one file per migration, imported for effect from `main`.
 
 ```
 app/
@@ -127,10 +89,7 @@ app/
 import _ "app/migrations"
 ```
 
-Names order migrations lexically and are recorded in the database, so start
-them with a sortable timestamp. Registration panics on duplicate or malformed
-names at init time — a broken migration set stops the program before it
-touches anything.
+Names order lexically and are recorded in the database, so start them with a sortable timestamp. Registration panics on duplicate or malformed names at init time.
 
 ### Columns
 
@@ -154,27 +113,29 @@ s.Create("articles", func(t *migrate.Table) {
 ```
 
 Columns are `NOT NULL` unless declared `.Nullable()`. Modifiers chain:
-`.Default(v)`, `.DefaultExpr(expr)`, `.UseCurrent()`, `.Unsigned()`,
-`.Unique()`, `.Index()`, `.Primary()`, `.AutoIncrement()`, `.Comment(...)`,
-`.StoredAs(expr)`/`.VirtualAs(expr)` for generated columns, and MySQL's
-`.After(...)`/`.First()`/`.UseCurrentOnUpdate()`.
 
-Table names may be schema-qualified — `s.Create("analytics.events", ...)`
-renders `"analytics"."events"` and conventional constraint names stay inside
-the schema. Named CHECK constraints round out the constraint set (anonymous
-checks are rejected — an unnamed constraint cannot be dropped later):
+- Any engine: `.Default(v)`, `.DefaultExpr(expr)`, `.UseCurrent()`, `.Unsigned()`, `.Unique()`, `.Index()`, `.Primary()`, `.AutoIncrement()`, `.Comment(...)`.
+- Generated columns: `.StoredAs(expr)`, `.VirtualAs(expr)`.
+- MySQL only: `.After(...)`, `.First()`, `.UseCurrentOnUpdate()`.
+
+Table names may be schema-qualified: `s.Create("analytics.events", ...)` renders `"analytics"."events"`, with conventional constraint names inside the schema.
+
+CHECK constraints must be named; anonymous checks are rejected (an unnamed constraint cannot be dropped later).
 
 ```go
 t.Check("orders_price_positive", "price > 0")   // in Create or Table
 t.DropCheck("orders_price_positive")            // reverses an added check
 ```
 
-`.AutoIncrement()` turns any integer column into the database-generated
-primary key, preferring each engine's generated-column form: an SQL-standard
-identity column on Postgres (`GENERATED BY DEFAULT AS IDENTITY`, not legacy
-serial), `AUTO_INCREMENT` on MySQL, `INTEGER PRIMARY KEY AUTOINCREMENT` on
-SQLite. `t.ID()` is the conventional shorthand for
-`t.BigInteger("id").Unsigned().AutoIncrement()`.
+`.AutoIncrement()` makes any integer column the database-generated primary key, in each engine's form:
+
+| Engine | Form |
+|---|---|
+| Postgres | identity column, `GENERATED BY DEFAULT AS IDENTITY` (not legacy serial) |
+| MySQL | `AUTO_INCREMENT` |
+| SQLite | `INTEGER PRIMARY KEY AUTOINCREMENT` |
+
+`t.ID()` is shorthand for `t.BigInteger("id").Unsigned().AutoIncrement()`.
 
 ### Indexes and foreign keys
 
@@ -188,10 +149,7 @@ t.ForeignID("category_id").Constrained().NullOnDelete()
 t.Foreign("code").References("regions", "code")   // existing column, explicit
 ```
 
-Index and constraint names follow one convention —
-`{table}_{columns}_{index|unique|foreign}` — so dropping by columns
-(`t.DropIndex("a", "b")`, `t.DropForeign("user_id")`) reconstructs the same
-name that creating produced.
+Names follow `{table}_{columns}_{index|unique|foreign}`, so dropping by columns (`t.DropIndex("a", "b")`, `t.DropForeign("user_id")`) reconstructs the created name.
 
 ### Altering tables
 
@@ -206,23 +164,11 @@ migrate.Add("20260801120000_polish_users", func(s *migrate.Schema) {
 })
 ```
 
-Each change compiles to its own statement and reverses individually; the
-whole migration still runs in one transaction where the engine allows it.
-Also available: `t.RenameIndex(from, to)`, `t.DropIndex/DropUnique/DropForeign`
-(by columns, via the conventional names), `t.DropPrimary()`, and table
-comments with `t.Comment(...)`.
+Each change compiles to its own statement and reverses individually; the migration runs in one transaction where the engine allows. Also: `t.RenameIndex(from, to)`, `t.DropIndex`/`DropUnique`/`DropForeign` (by columns, via conventional names), `t.DropPrimary()`, and table comments via `t.Comment(...)`.
 
 ### Rebuilding tables
 
-What `ALTER TABLE` cannot express — on SQLite, any constraint change —
-`Recreate` can: declare the complete target table and the migrator rebuilds
-it around the data (create temporary → copy rows → capture triggers → drop
-old → rename → rebuild indexes → recreate triggers), inside the migration's
-transaction on Postgres and SQLite, so a failure leaves the original table
-untouched. MySQL refuses to compile a
-`Recreate` — its implicit DDL commits would open a crash window with the live
-table dropped, and its native `ALTER TABLE` already changes types and
-constraints directly:
+`Recreate` handles what `ALTER TABLE` cannot (on SQLite, any constraint change): declare the full target table and the migrator rebuilds it around the data (create temporary → copy rows → capture triggers → drop old → rename → rebuild indexes → recreate triggers), within the migration's transaction on Postgres and SQLite, so a failure leaves the original untouched. MySQL refuses to compile `Recreate`: its implicit DDL commits would open a crash window with the live table dropped, and its native `ALTER TABLE` changes types and constraints directly.
 
 ```go
 s.Recreate("users", func(t *migrate.Table) {
@@ -232,36 +178,22 @@ s.Recreate("users", func(t *migrate.Table) {
 })
 ```
 
-`Recreate` needs its transaction (combining it with `WithoutTransaction` is a
-compile-time error), and on Postgres a table referenced by other tables'
-foreign keys or by views cannot be rebuilt — the drop is refused and the
-transaction rolls back cleanly; use native `ALTER` there instead.
+- `Recreate` requires its transaction; combining it with `WithoutTransaction` is a compile-time error.
+- On Postgres, a table referenced by other tables' foreign keys or by views cannot be rebuilt; the drop is refused and the transaction rolls back cleanly. Use native `ALTER` there.
 
-Columns copy by name; `SkipCopy` marks ones the old table does not have, and
-`CopyFrom` substitutes a SELECT expression — renaming a column and converting
-its type in one rebuild:
+Columns copy by name. `SkipCopy` marks columns absent from the old table; `CopyFrom` substitutes a SELECT expression, renaming and retyping a column in one rebuild:
 
 ```go
 t.Integer("age").CopyFrom("CAST(age AS INTEGER)")
 ```
-Conventional constraint and index names come out for the *final* table name,
-so later `DropUnique`/`DropForeign` calls still resolve. Recreate discards
-the old definition, so rolling back needs a `WithDown` (usually another
-`Recreate` declaring the previous shape). One SQLite caveat: with
-`PRAGMA foreign_keys=ON` and child rows referencing the table, run the
-migration on a connection with enforcement off — enforcement is off by
-default in SQLite and most drivers.
 
-Triggers on the table — created through `Exec`, since the builder does not
-declare them — are captured at migration time and recreated verbatim after
-the rename; `DROP TABLE` would otherwise silently take them along. A trigger
-body the new shape breaks fails the replay and rolls the migration back:
-drop it with `Exec` before the `Recreate` and declare its successor after.
+Conventional constraint and index names come out for the *final* table name, so later `DropUnique`/`DropForeign` still resolve. `Recreate` discards the old definition, so rolling back needs a `WithDown` (usually another `Recreate` for the previous shape).
 
-There is deliberately no `Change()` for redefining a column's type in place.
-That API is where migration tools quietly lose modifiers, and SQLite cannot
-do it at all without rebuilding the table. Say what you mean with SQL — it
-stays reviewable in `Plan` and checksummed like everything else:
+SQLite caveat: with `PRAGMA foreign_keys=ON` and child rows referencing the table, run on a connection with enforcement off (off by default in SQLite and most drivers).
+
+Triggers (created via `Exec`, since the builder does not declare them) are captured and recreated verbatim after the rename, which `DROP TABLE` would otherwise remove. A trigger the new shape breaks fails the replay and rolls back; drop it with `Exec` before the `Recreate` and declare its successor after.
+
+There is no `Change()` for redefining a column type in place; SQLite cannot without rebuilding. Use SQL — reviewable in `Plan` and checksummed:
 
 ```go
 migrate.Add("20260812100000_widen_amounts",
@@ -292,10 +224,7 @@ migrate.Add("20260805090000_backfill",
 )
 ```
 
-`Run` receives the migration's transaction when there is one; `migrate.DB` is
-satisfied by both `*sql.Tx` and `*sql.DB`, so the code reads the same either
-way. Statements that refuse to run inside a transaction — most famously
-`CREATE INDEX CONCURRENTLY` — mark the migration `migrate.WithoutTransaction()`:
+`Run` receives the migration's transaction when present; `migrate.DB` is satisfied by both `*sql.Tx` and `*sql.DB`. Statements that cannot run in a transaction (e.g. `CREATE INDEX CONCURRENTLY`) set `migrate.WithoutTransaction()`:
 
 ```go
 migrate.Add("20260810110000_index_events",
@@ -311,11 +240,7 @@ migrate.Add("20260810110000_index_events",
 
 ### Repeatable migrations
 
-A versioned migration runs once; a repeatable migration runs whenever its
-compiled SQL differs from what was last recorded. That is the natural home
-for anything defined by replacement — views, stored functions, triggers,
-reference data — where history is noise and only the current definition
-matters:
+A versioned migration runs once; a repeatable migration runs whenever its compiled SQL differs from the last recorded value. Use it for views, stored functions, triggers, and reference data.
 
 ```go
 migrate.AddRepeatable("active_users_view", func(s *migrate.Schema) {
@@ -324,20 +249,11 @@ migrate.AddRepeatable("active_users_view", func(s *migrate.Schema) {
 })
 ```
 
-Editing the view is the whole workflow: change the declaration, deploy, and
-the next `Up` re-runs it (after all versioned migrations, in name order).
-Declarations must be idempotent — `CREATE OR REPLACE`, or `DROP ... IF EXISTS`
-followed by `CREATE` on SQLite, which has no `OR REPLACE`. `Status` shows a
-changed repeatable as drifted-pending, `Plan` renders what would re-run, and
-rollbacks leave repeatables untouched (`Reset` forgets their records so a
-fresh `Up` runs them again). A `Run` function's body is invisible to the
-checksum, so edit SQL, not Go, when the change should trigger a re-run.
-
-Two edges worth knowing: rolling back a *versioned* migration whose table a
-repeatable view depends on is refused by Postgres while the view exists —
-drop the dependent object first (deliberate: cascading silently would destroy
-objects you did not name). And on databases without `CREATE OR REPLACE`
-(SQLite), declare idempotency as `DROP ... IF EXISTS` + `CREATE`.
+- Change the declaration and deploy; the next `Up` re-runs it, after all versioned migrations, in name order.
+- Declarations must be idempotent: `CREATE OR REPLACE`, or `DROP ... IF EXISTS` + `CREATE` on SQLite (no `OR REPLACE`).
+- `Status` shows a changed repeatable as drifted-pending; `Plan` renders what would re-run; rollbacks leave repeatables untouched (`Reset` forgets their records, so a fresh `Up` re-runs them).
+- A `Run` body is invisible to the checksum; edit SQL, not Go, to trigger a re-run.
+- Postgres refuses to roll back a versioned migration whose table a live repeatable view depends on; drop the dependent object first.
 
 ## Running
 
@@ -354,8 +270,7 @@ objects you did not name). And on databases without `CREATE OR REPLACE`
 | `m.Repair(ctx)` | re-record versioned checksums after a reviewed change (repeatables stay due) |
 | `m.Fresh(ctx)` | **development only**: drop every table, re-run everything |
 
-Typical wiring runs `Up` at startup — safe with multiple replicas thanks to
-the advisory lock — or from a dedicated deploy step:
+Run `Up` at startup (safe across replicas via the advisory lock) or from a dedicated deploy step:
 
 ```go
 m, err := migrate.New(db, migrate.Postgres,
@@ -364,33 +279,19 @@ m, err := migrate.New(db, migrate.Postgres,
 )
 ```
 
-Options: `WithCollection` (explicit collection instead of the global
-registry), `WithTable` (records table name), `WithoutLock`, `WithLockTimeout`,
-`WithStrictChecksum`, `WithLogger`, `WithClock`.
+Options: `WithCollection` (explicit collection instead of the global registry), `WithTable` (records table name), `WithoutLock`, `WithLockTimeout`, `WithStrictChecksum`, `WithLogger`, `WithClock`.
 
 ## Safety analysis
 
-Some operations are harmless on an empty development database and incidents
-on a loaded production one: dropping a column running code still reads,
-adding a `NOT NULL` column to a populated table, building an index that
-blocks writes. Because declarations are data, the migrator sees these before
-executing anything:
+Some operations are safe on an empty database but dangerous on a loaded one: dropping a column live code still reads, adding a `NOT NULL` column to a populated table, building an index that blocks writes. The migrator detects these before executing anything.
 
-- **`SafetyWarn`** (default) logs each finding through `WithLogger` and
-  proceeds.
-- **`WithSafety(migrate.SafetyStrict)`** makes `Up` fail with `ErrUnsafe`
-  before executing anything, listing every finding across the run — wire it
-  into CI.
-- **`Assured()`** marks a reviewed migration so the analysis skips it; the
-  finding was considered and accepted (small table, maintenance window, code
-  already deployed).
+| Mode | Behavior |
+|---|---|
+| `SafetyWarn` (default) | logs each finding through `WithLogger` and proceeds |
+| `WithSafety(migrate.SafetyStrict)` | `Up` fails with `ErrUnsafe` before executing, listing every finding across the run; wire it into CI |
+| `Assured()` | marks a reviewed migration so the analysis skips it |
 
-`Plan` attaches the findings to each planned migration. Creating tables never
-warns, and raw `Exec`/`Run` are deliberately not second-guessed — the
-analysis covers the declarative operations where it can be precise:
-destructive drops, backward-incompatible renames, `NOT NULL` additions
-without defaults, and Postgres index/foreign-key builds that lock large
-tables (with the `CONCURRENTLY` / `NOT VALID` escape routes in the message).
+`Plan` attaches findings to each planned migration. Creating tables never warns; raw `Exec`/`Run` are not analyzed. The analysis covers declarative operations: destructive drops, backward-incompatible renames, `NOT NULL` additions without defaults, and Postgres index/foreign-key builds that lock large tables (the message names the `CONCURRENTLY` / `NOT VALID` escape routes).
 
 ## Transactions and engines
 
@@ -400,34 +301,16 @@ tables (with the `CONCURRENTLY` / `NOT VALID` escape routes in the message).
 | Advisory lock | `pg_advisory_lock`, session-level | `GET_LOCK`, session-level | none — the single-writer file and record-first bookkeeping arbitrate |
 | Altering constraints | full support | full support | compile-time error with guidance |
 
-Each migration runs in its own transaction by default. On MySQL the
-transaction still protects data statements, but a failure mid-migration
-leaves earlier DDL in effect — the error says so explicitly, names the failing
-statement, and the migration is not recorded, so a fixed version simply runs
-again. Keep MySQL migrations to a single DDL statement when you can.
+Each migration runs in its own transaction by default. On MySQL the transaction still protects data statements, but a mid-migration failure leaves earlier DDL in effect; the error says so, names the failing statement, and does not record the migration, so a fixed version runs again. Keep MySQL migrations to a single DDL statement where possible.
 
-One caveat worth knowing: session-level advisory locks do not survive
-transaction-pooling proxies (PgBouncer in transaction mode). Point the
-migrator at the database directly or through a session-mode pool.
+Session-level advisory locks do not survive transaction-pooling proxies (PgBouncer in transaction mode). Point the migrator at the database directly or through a session-mode pool.
 
 ## Design notes
 
-- **Declarations are pure data.** A migration function only records
-  operations; nothing executes while declaring. This one property is what
-  makes automatic reversal, offline rendering, checksums and dialect
-  portability all fall out of the same code path. It also means declarations
-  must be deterministic — derive nothing from the clock or environment.
-- **Forward-first, reversible when it's free.** Rollbacks exist for
-  development flow and staged deploys, and they come for free for structural
-  operations. But nothing pretends a destructive operation can be undone:
-  irreversibility is an explicit, typed error, not a runtime surprise.
-- **The library is the whole product.** There is no companion CLI to install
-  and no login wall: anything a CLI would do — status, plans, baselines — is a
-  method call you can wire into your own tooling in a few lines.
-- **Convention with an exit hatch everywhere.** Inferred parent tables,
-  conventional constraint names and portable column types cover the common
-  case; every one of them accepts an explicit override (`Constrained("people")`,
-  `.Name("...")`, `t.Column(name, "any type")`, `s.Exec("any SQL")`).
+- **Declarations are data.** Nothing runs while declaring; declarations must be deterministic — derive nothing from the clock or environment.
+- **Forward-first.** Rollbacks come free for structural operations; irreversibility is an explicit, typed error.
+- **No CLI.** Status, plans, and baselines are method calls, not a separate tool or login wall.
+- **Convention with overrides.** Inferred parent tables, conventional constraint names, and portable column types each take an explicit override (`Constrained("people")`, `.Name("...")`, `t.Column(name, "any type")`, `s.Exec("any SQL")`).
 
 ## License
 
