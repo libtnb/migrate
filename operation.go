@@ -79,6 +79,9 @@ type columnDef struct {
 
 	skipCopy bool   // Recreate: no matching column in the old table
 	copyFrom string // Recreate: SELECT expression replacing the by-name copy
+
+	change      bool   // Schema.Table only: restate the column instead of adding it
+	changeUsing string // Change on Postgres: USING expression converting existing rows
 }
 
 // integerKind reports whether the column type can auto-increment.
@@ -99,9 +102,33 @@ func (c *columnDef) inlinePrimary() bool {
 }
 
 type indexDef struct {
-	name    string // empty means the conventional name
-	columns []string
-	unique  bool
+	name     string // empty means the conventional name
+	columns  []string
+	exprs    []string // expression index: SQL rendered verbatim instead of columns
+	unique   bool
+	fulltext bool // MySQL FULLTEXT
+	spatial  bool // MySQL SPATIAL
+
+	where            string   // partial index predicate (Postgres, SQLite)
+	using            string   // index method: gin/gist/brin/hash on Postgres, btree/hash on MySQL
+	include          []string // covering columns (Postgres INCLUDE)
+	nullsNotDistinct bool     // Postgres 15+: NULLS NOT DISTINCT on a unique index
+	concurrently     bool     // Postgres: CREATE INDEX CONCURRENTLY (needs WithoutTransaction)
+}
+
+// suffix names the index kind in the conventional {table}_{columns}_{suffix}
+// name, so dropping by columns can reconstruct what adding by columns produced.
+func (i *indexDef) suffix() string {
+	switch {
+	case i.fulltext:
+		return "fulltext"
+	case i.spatial:
+		return "spatial"
+	case i.unique:
+		return "unique"
+	default:
+		return "index"
+	}
 }
 
 type checkDef struct {
@@ -147,11 +174,7 @@ func (d *tableDef) constraintTable() string {
 // build on the unqualified table name: constraints already live inside the
 // table's schema.
 
-func indexName(table string, columns []string, unique bool) string {
-	suffix := "index"
-	if unique {
-		suffix = "unique"
-	}
+func indexName(table string, columns []string, suffix string) string {
 	return baseName(table) + "_" + strings.Join(columns, "_") + "_" + suffix
 }
 
@@ -167,7 +190,7 @@ func (i *indexDef) resolvedName(table string) string {
 	if i.name != "" {
 		return i.name
 	}
-	return indexName(table, i.columns, i.unique)
+	return indexName(table, i.columns, i.suffix())
 }
 
 func (f *foreignDef) resolvedName(table string) string {
@@ -261,6 +284,9 @@ type addColumn struct {
 }
 
 func (c *addColumn) inverseChange(table string) ([]change, error) {
+	if c.col.change {
+		return nil, irreversible("changing column %q of table %q discards its previous definition", c.col.name, table)
+	}
 	// Indexes implied by Unique/Index modifiers drop before the column does:
 	// Postgres and MySQL would cascade them away, but SQLite refuses to drop
 	// a column that an index still references.
@@ -292,11 +318,14 @@ type addIndex struct {
 }
 
 func (c *addIndex) inverseChange(table string) ([]change, error) {
-	return []change{&dropIndex{name: c.idx.resolvedName(table)}}, nil
+	// A concurrently built index also drops concurrently: the rollback runs
+	// in the same WithoutTransaction migration the build required.
+	return []change{&dropIndex{name: c.idx.resolvedName(table), concurrently: c.idx.concurrently}}, nil
 }
 
 type dropIndex struct {
-	name string
+	name         string
+	concurrently bool // Postgres: DROP INDEX CONCURRENTLY
 }
 
 func (c *dropIndex) inverseChange(table string) ([]change, error) {

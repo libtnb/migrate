@@ -91,7 +91,7 @@ func (m *Migration) downOps() ([]operation, error) {
 // validateSchema surfaces declaration mistakes collected while recording.
 func validateSchema(name string, s *Schema) error {
 	errs := append([]error(nil), s.errs...)
-	check := func(table string, cols []*columnDef) {
+	check := func(table string, cols []*columnDef, altering bool) {
 		for _, c := range cols {
 			if c.autoIncr {
 				switch {
@@ -113,6 +113,20 @@ func validateSchema(name string, s *Schema) error {
 				// SQLite would honour the contradiction and accept NULL keys.
 				errs = append(errs, fmt.Errorf("primary key column %q of table %q cannot be nullable", c.name, table))
 			}
+			if c.change && !altering {
+				errs = append(errs, fmt.Errorf("column %q of table %q declares Change, which is only valid inside Schema.Table", c.name, table))
+			}
+			if c.changeUsing != "" && !c.change {
+				errs = append(errs, fmt.Errorf("column %q of table %q declares Using without Change", c.name, table))
+			}
+			if c.change {
+				if c.unique || c.indexed {
+					errs = append(errs, fmt.Errorf("changed column %q of table %q cannot restate Unique/Index modifiers; the existing indexes stay — declare index changes separately", c.name, table))
+				}
+				if c.autoIncr || c.primary || c.generatedExpr != "" {
+					errs = append(errs, fmt.Errorf("changed column %q of table %q cannot restate auto-increment, primary key or generated expressions; use Exec for those", c.name, table))
+				}
+			}
 		}
 	}
 	checkTablePK := func(def *tableDef) {
@@ -133,17 +147,17 @@ func validateSchema(name string, s *Schema) error {
 		switch o := op.(type) {
 		case *createTable:
 			errs = append(errs, o.def.errs...)
-			check(o.def.name, o.def.columns)
+			check(o.def.name, o.def.columns, false)
 			checkTablePK(o.def)
 		case *recreateTable:
 			errs = append(errs, o.def.errs...)
-			check(o.def.name, o.def.columns)
+			check(o.def.name, o.def.columns, false)
 			checkTablePK(o.def)
 		case *alterTable:
 			errs = append(errs, o.errs...)
 			for _, ch := range o.changes {
 				if add, ok := ch.(*addColumn); ok {
-					check(o.table, []*columnDef{add.col})
+					check(o.table, []*columnDef{add.col}, true)
 				}
 			}
 		}
@@ -196,6 +210,13 @@ func (m *Migration) compile(d Dialect, up bool) ([]statement, error) {
 			}
 		}
 	}
+	// Postgres refuses CREATE/DROP INDEX CONCURRENTLY inside a transaction;
+	// surface the conflict at compile time instead of from the server.
+	if m.useTx && d.name() == "postgres" {
+		if idx := firstConcurrentIndex(ops); idx != "" {
+			return nil, fmt.Errorf("migration %q: index %q builds Concurrently, which cannot run inside a transaction; declare the migration WithoutTransaction()", m.name, idx)
+		}
+	}
 	var stmts []statement
 	for _, op := range ops {
 		s, err := d.compile(op)
@@ -210,6 +231,45 @@ func (m *Migration) compile(d Dialect, up bool) ([]statement, error) {
 		stmts = append(stmts, s...)
 	}
 	return stmts, nil
+}
+
+// firstConcurrentIndex returns the resolved name of the first index declared
+// Concurrently among the operations, or "" when there is none.
+func firstConcurrentIndex(ops []operation) string {
+	fromDef := func(def *tableDef) string {
+		for _, idx := range def.indexes {
+			if idx.concurrently {
+				return idx.resolvedName(def.name)
+			}
+		}
+		return ""
+	}
+	for _, op := range ops {
+		switch o := op.(type) {
+		case *createTable:
+			if n := fromDef(o.def); n != "" {
+				return n
+			}
+		case *recreateTable:
+			if n := fromDef(o.def); n != "" {
+				return n
+			}
+		case *alterTable:
+			for _, ch := range o.changes {
+				switch c := ch.(type) {
+				case *addIndex:
+					if c.idx.concurrently {
+						return c.idx.resolvedName(o.table)
+					}
+				case *dropIndex:
+					if c.concurrently {
+						return c.name
+					}
+				}
+			}
+		}
+	}
+	return ""
 }
 
 // operationCommitsImplicitly reports whether an operation's statements end a

@@ -251,6 +251,74 @@ func (t *Table) Unique(columns ...string) *Index {
 	return &Index{def: idx}
 }
 
+// FullText declares a MySQL FULLTEXT index over the given columns, named
+// {table}_{columns}_fulltext unless renamed with Name. Postgres full-text
+// search indexes a tsvector instead — declare it with IndexExpr and
+// Using("gin") — and SQLite's FTS5 is a virtual table created with Exec; both
+// refuse FullText at compile time to keep the search setup explicit.
+//
+//	t.FullText("title", "body")
+func (t *Table) FullText(columns ...string) *Index {
+	idx := &indexDef{columns: columns, fulltext: true}
+	if len(columns) == 0 {
+		t.errf("fulltext index on table %q declares no columns", t.table)
+	}
+	t.addIndexDef(idx)
+	return &Index{def: idx}
+}
+
+// Spatial declares a MySQL SPATIAL index over a geometry column, named
+// {table}_{columns}_spatial unless renamed with Name. The column must be a
+// NOT NULL geometry type, declared via Column (e.g. Column("location",
+// "POINT SRID 4326")). Postgres indexes geometries with PostGIS through
+// Using("gist"); SQLite has no spatial indexes. Both refuse at compile time.
+func (t *Table) Spatial(columns ...string) *Index {
+	idx := &indexDef{columns: columns, spatial: true}
+	if len(columns) == 0 {
+		t.errf("spatial index on table %q declares no columns", t.table)
+	}
+	t.addIndexDef(idx)
+	return &Index{def: idx}
+}
+
+// IndexExpr declares an index over SQL expressions instead of plain columns,
+// for lookups the stored value cannot serve directly — case-insensitive
+// matching, a JSON field, a computed prefix. Expressions are written verbatim
+// and cannot produce a conventional name, so one is required:
+//
+//	t.IndexExpr("users_email_lower_index", "lower(email)")
+//
+// Postgres and SQLite index expressions directly; MySQL 8.0.13+ builds the
+// equivalent functional index. Drop it with DropIndexByName.
+func (t *Table) IndexExpr(name string, exprs ...string) *Index {
+	return t.exprIndex(name, exprs, false)
+}
+
+// UniqueExpr declares a unique index over SQL expressions, IndexExpr's unique
+// form:
+//
+//	t.UniqueExpr("users_email_lower_unique", "lower(email)")
+func (t *Table) UniqueExpr(name string, exprs ...string) *Index {
+	return t.exprIndex(name, exprs, true)
+}
+
+func (t *Table) exprIndex(name string, exprs []string, unique bool) *Index {
+	idx := &indexDef{name: name, exprs: exprs, unique: unique}
+	if name == "" {
+		t.errf("expression index on table %q needs an explicit name: expressions cannot form a conventional one", t.table)
+	}
+	if len(exprs) == 0 {
+		t.errf("expression index %q on table %q declares no expressions", name, t.table)
+	}
+	for _, e := range exprs {
+		if strings.TrimSpace(e) == "" {
+			t.errf("expression index %q on table %q declares an empty expression", name, t.table)
+		}
+	}
+	t.addIndexDef(idx)
+	return &Index{def: idx}
+}
+
 // Primary declares a composite primary key. For the common single
 // auto-incrementing key, use ID instead.
 func (t *Table) Primary(columns ...string) {
@@ -348,7 +416,7 @@ func (t *Table) DropColumn(names ...string) {
 // with a custom name, use DropIndexByName.
 func (t *Table) DropIndex(columns ...string) {
 	if t.alterOnly("DropIndex") {
-		t.alter.changes = append(t.alter.changes, &dropIndex{name: indexName(t.table, columns, false)})
+		t.alter.changes = append(t.alter.changes, &dropIndex{name: indexName(t.table, columns, "index")})
 	}
 }
 
@@ -356,7 +424,23 @@ func (t *Table) DropIndex(columns ...string) {
 // given columns, using the conventional {table}_{columns}_unique name.
 func (t *Table) DropUnique(columns ...string) {
 	if t.alterOnly("DropUnique") {
-		t.alter.changes = append(t.alter.changes, &dropIndex{name: indexName(t.table, columns, true)})
+		t.alter.changes = append(t.alter.changes, &dropIndex{name: indexName(t.table, columns, "unique")})
+	}
+}
+
+// DropFullText removes the fulltext index that FullText would have created on
+// the given columns, using the conventional {table}_{columns}_fulltext name.
+func (t *Table) DropFullText(columns ...string) {
+	if t.alterOnly("DropFullText") {
+		t.alter.changes = append(t.alter.changes, &dropIndex{name: indexName(t.table, columns, "fulltext")})
+	}
+}
+
+// DropSpatial removes the spatial index that Spatial would have created on
+// the given columns, using the conventional {table}_{columns}_spatial name.
+func (t *Table) DropSpatial(columns ...string) {
+	if t.alterOnly("DropSpatial") {
+		t.alter.changes = append(t.alter.changes, &dropIndex{name: indexName(t.table, columns, "spatial")})
 	}
 }
 

@@ -135,6 +135,41 @@ func (c *Column) VirtualAs(expr string) *Column {
 	return c
 }
 
+// Change restates an existing column's definition instead of adding a new
+// column — declare the complete target shape, exactly like a fresh
+// declaration, and the dialect alters the column to match:
+//
+//	s.Table("users", func(t *migrate.Table) {
+//		t.String("name", 500).Nullable().Change()
+//	})
+//
+// MySQL compiles to MODIFY COLUMN; Postgres to ALTER COLUMN statements for
+// the type, nullability, default and comment — narrowing conversions may need
+// Using. SQLite cannot alter columns: use Schema.Recreate there. Changing a
+// column discards its previous definition and is therefore irreversible;
+// rolling back requires WithDown. Index modifiers (Unique, Index), primary
+// keys, auto-increment and generated expressions cannot be restated — declare
+// index changes separately and change constraints with the dedicated methods.
+//
+// Only valid inside Schema.Table.
+func (c *Column) Change() *Column {
+	c.def.change = true
+	return c
+}
+
+// Using sets the Postgres USING expression that converts existing rows when a
+// Change alters the column's type and the old values are not implicitly
+// castable:
+//
+//	t.Integer("age").Change().Using("age::integer")
+//
+// Other dialects convert implicitly (MySQL) or cannot change columns at all
+// (SQLite) and refuse Using at compile time.
+func (c *Column) Using(expr string) *Column {
+	c.def.changeUsing = expr
+	return c
+}
+
 // CopyFrom sets the SELECT expression that fills this column during a
 // Schema.Recreate, instead of copying a column of the same name — renames and
 // type conversions in one step:
@@ -158,7 +193,8 @@ func (c *Column) SkipCopy() *Column {
 	return c
 }
 
-// Index is the fluent handle returned by Table.Index and Table.Unique.
+// Index is the fluent handle returned by Table.Index, Table.Unique and the
+// other index declarations.
 type Index struct {
 	def *indexDef
 }
@@ -167,6 +203,67 @@ type Index struct {
 // A named index must be dropped with DropIndexByName.
 func (i *Index) Name(name string) *Index {
 	i.def.name = name
+	return i
+}
+
+// Where makes this a partial index, covering only the rows matching the
+// predicate — the standard shape for uniqueness among live rows in a
+// soft-delete scheme:
+//
+//	t.Unique("email").Where("deleted_at IS NULL")
+//
+// Postgres and SQLite support partial indexes; MySQL does not and refuses the
+// declaration at compile time — enforce the rule in application code or model
+// it with a generated column there.
+func (i *Index) Where(predicate string) *Index {
+	i.def.where = predicate
+	return i
+}
+
+// Using selects the index method: gin, gist, brin, hash, btree or spgist on
+// Postgres (gin is the usual choice for JSONB and array columns), btree or
+// hash on MySQL. SQLite has a single index type and refuses Using at compile
+// time.
+//
+//	t.Index("settings").Using("gin")
+func (i *Index) Using(method string) *Index {
+	i.def.using = method
+	return i
+}
+
+// Include adds non-key columns to the index leaf pages (Postgres 11+), so
+// queries filtering on the key columns read the included ones without
+// visiting the table — a covering index. MySQL and SQLite have no INCLUDE;
+// declare a wider composite index there instead.
+//
+//	t.Unique("email").Include("name", "created_at")
+func (i *Index) Include(columns ...string) *Index {
+	i.def.include = append(i.def.include, columns...)
+	return i
+}
+
+// NullsNotDistinct makes a unique index treat NULLs as equal (Postgres 15+),
+// so at most one row may hold NULL in the indexed columns. Other dialects
+// cannot express it and refuse at compile time.
+func (i *Index) NullsNotDistinct() *Index {
+	i.def.nullsNotDistinct = true
+	return i
+}
+
+// Concurrently builds the index without locking writes (Postgres), the
+// production-safe way to index a large, live table. Such a statement cannot
+// run inside a transaction: the migration must be declared
+// WithoutTransaction, which compile enforces. Rolling the migration back
+// drops the index concurrently too. MySQL and SQLite build indexes without
+// long write locks anyway and ignore it.
+//
+//	migrate.Add("20260708093000_index_events_user", func(s *migrate.Schema) {
+//		s.Table("events", func(t *migrate.Table) {
+//			t.Index("user_id").Concurrently()
+//		})
+//	}, migrate.WithoutTransaction())
+func (i *Index) Concurrently() *Index {
+	i.def.concurrently = true
 	return i
 }
 

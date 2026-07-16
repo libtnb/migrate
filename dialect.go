@@ -165,23 +165,32 @@ func checkClause(q quoter, chk *checkDef) string {
 	return fmt.Sprintf("CONSTRAINT %s CHECK (%s)", q.ident(chk.name), chk.expr)
 }
 
-// defaultClause renders the DEFAULT part of a column definition. currentTS is
-// the dialect's current-timestamp expression, which MySQL requires to carry
-// the column's fractional precision.
-func defaultClause(c *columnDef, backslashEscapes bool, currentTS string) (string, error) {
+// defaultValueSQL renders a column's declared default as a bare SQL value, or
+// "" when none is declared. currentTS is the dialect's current-timestamp
+// expression, which MySQL requires to carry the column's fractional precision.
+func defaultValueSQL(c *columnDef, backslashEscapes bool, currentTS string) (string, error) {
 	switch {
 	case c.useCurrent:
-		return " DEFAULT " + currentTS, nil
+		return currentTS, nil
 	case c.defaultExpr != "":
-		return " DEFAULT (" + c.defaultExpr + ")", nil
+		return "(" + c.defaultExpr + ")", nil
 	case c.hasDefault:
 		lit, err := literal(c.defaultVal, backslashEscapes)
 		if err != nil {
 			return "", fmt.Errorf("column %q: %w", c.name, err)
 		}
-		return " DEFAULT " + lit, nil
+		return lit, nil
 	}
 	return "", nil
+}
+
+// defaultClause renders the DEFAULT part of a column definition.
+func defaultClause(c *columnDef, backslashEscapes bool, currentTS string) (string, error) {
+	value, err := defaultValueSQL(c, backslashEscapes, currentTS)
+	if err != nil || value == "" {
+		return "", err
+	}
+	return " DEFAULT " + value, nil
 }
 
 // foreignClause renders an inline FOREIGN KEY table constraint, shared by all
@@ -203,25 +212,126 @@ func foreignClause(q quoter, table string, fk *foreignDef) string {
 	return b.String()
 }
 
+// validateIndex is the per-dialect support matrix for index features; every
+// unsupported combination fails compilation with advice instead of silently
+// producing a weaker index.
+func validateIndex(dialect, table string, idx *indexDef) error {
+	name := idx.resolvedName(table)
+	switch dialect {
+	case "postgres":
+		if idx.fulltext {
+			return fmt.Errorf("migrate: postgres has no FULLTEXT index (index %q of table %q); index a tsvector expression instead: IndexExpr(name, \"to_tsvector('english', col)\").Using(\"gin\")", name, table)
+		}
+		if idx.spatial {
+			return fmt.Errorf("migrate: postgres has no SPATIAL index (index %q of table %q); use PostGIS with Using(\"gist\")", name, table)
+		}
+		if idx.nullsNotDistinct && !idx.unique {
+			return fmt.Errorf("migrate: NULLS NOT DISTINCT applies to unique indexes only (index %q of table %q)", name, table)
+		}
+	case "mysql":
+		if idx.where != "" {
+			return fmt.Errorf("migrate: mysql does not support partial indexes (index %q of table %q declares Where); enforce the rule in application code or index a generated column", name, table)
+		}
+		if len(idx.include) > 0 {
+			return fmt.Errorf("migrate: mysql has no INCLUDE columns (index %q of table %q); declare a wider composite index instead", name, table)
+		}
+		if idx.nullsNotDistinct {
+			return fmt.Errorf("migrate: mysql cannot make NULLs distinct in unique indexes (index %q of table %q)", name, table)
+		}
+		if (idx.fulltext || idx.spatial) && idx.using != "" {
+			return fmt.Errorf("migrate: fulltext and spatial indexes choose their own structure; drop Using on index %q of table %q", name, table)
+		}
+		if (idx.fulltext || idx.spatial) && len(idx.exprs) > 0 {
+			return fmt.Errorf("migrate: fulltext and spatial indexes cover columns, not expressions (index %q of table %q)", name, table)
+		}
+	case "sqlite":
+		if idx.fulltext {
+			return fmt.Errorf("migrate: sqlite has no FULLTEXT index (index %q of table %q); create an FTS5 virtual table with Exec", name, table)
+		}
+		if idx.spatial {
+			return fmt.Errorf("migrate: sqlite has no SPATIAL index (index %q of table %q)", name, table)
+		}
+		if idx.using != "" {
+			return fmt.Errorf("migrate: sqlite has a single index type; drop Using on index %q of table %q", name, table)
+		}
+		if len(idx.include) > 0 {
+			return fmt.Errorf("migrate: sqlite has no INCLUDE columns (index %q of table %q); declare a wider composite index instead", name, table)
+		}
+		if idx.nullsNotDistinct {
+			return fmt.Errorf("migrate: sqlite cannot make NULLs distinct in unique indexes (index %q of table %q)", name, table)
+		}
+	}
+	return nil
+}
+
+// indexItems renders the indexed elements: quoted column names, or verbatim
+// expressions each in parentheses — the form MySQL requires for functional
+// indexes and the others accept.
+func indexItems(q quoter, idx *indexDef) string {
+	if len(idx.exprs) == 0 {
+		return q.idents(idx.columns)
+	}
+	items := make([]string, len(idx.exprs))
+	for i, e := range idx.exprs {
+		items[i] = "(" + e + ")"
+	}
+	return strings.Join(items, ", ")
+}
+
 // createIndexSQL renders a standalone CREATE INDEX, shared by all dialects.
 // Single-column indexes declared with Column.Unique/Index compile through
 // here too, so every index carries the conventional, reconstructible name.
 //
 // Engines disagree on where a schema qualification goes: SQLite attaches it
 // to the index name (the table must be bare), Postgres and MySQL to the table
-// (the index name must be bare).
-func createIndexSQL(q quoter, table string, idx *indexDef, schemaOnIndex bool) string {
-	unique := ""
-	if idx.unique {
-		unique = "UNIQUE "
+// (the index name must be bare). They also disagree on where the index method
+// goes: before the key list on Postgres (USING gin), after it on MySQL
+// (USING HASH).
+func createIndexSQL(dialect string, q quoter, table string, idx *indexDef, schemaOnIndex bool) (string, error) {
+	if err := validateIndex(dialect, table, idx); err != nil {
+		return "", err
 	}
+
+	kind := ""
+	switch {
+	case idx.unique:
+		kind = "UNIQUE "
+	case idx.fulltext:
+		kind = "FULLTEXT "
+	case idx.spatial:
+		kind = "SPATIAL "
+	}
+	concurrently := ""
+	if idx.concurrently && dialect == "postgres" {
+		// MySQL and SQLite build indexes without long write locks anyway;
+		// only Postgres needs the explicit online mode.
+		concurrently = "CONCURRENTLY "
+	}
+
 	name := idx.resolvedName(table)
+	var b strings.Builder
 	if schemaOnIndex {
-		return fmt.Sprintf("CREATE %sINDEX %s ON %s (%s)",
-			unique, q.table(schemaPrefix(table)+name), q.ident(baseName(table)), q.idents(idx.columns))
+		fmt.Fprintf(&b, "CREATE %sINDEX %s%s ON %s", kind, concurrently, q.table(schemaPrefix(table)+name), q.ident(baseName(table)))
+	} else {
+		fmt.Fprintf(&b, "CREATE %sINDEX %s%s ON %s", kind, concurrently, q.ident(name), q.table(table))
 	}
-	return fmt.Sprintf("CREATE %sINDEX %s ON %s (%s)",
-		unique, q.ident(name), q.table(table), q.idents(idx.columns))
+	if idx.using != "" && dialect == "postgres" {
+		b.WriteString(" USING " + idx.using)
+	}
+	b.WriteString(" (" + indexItems(q, idx) + ")")
+	if idx.using != "" && dialect == "mysql" {
+		b.WriteString(" USING " + strings.ToUpper(idx.using))
+	}
+	if len(idx.include) > 0 {
+		b.WriteString(" INCLUDE (" + q.idents(idx.include) + ")")
+	}
+	if idx.nullsNotDistinct {
+		b.WriteString(" NULLS NOT DISTINCT")
+	}
+	if idx.where != "" {
+		b.WriteString(" WHERE " + idx.where)
+	}
+	return b.String(), nil
 }
 
 // charLength defends against zero and negative declared lengths; the fluent
@@ -349,7 +459,11 @@ func compileRecreate(d Dialect, q quoter, schemaOnIndex bool, renameSQL func(fro
 		sqlStatement("DROP TABLE %s", q.table(def.name)),
 		renameSQL(tmp, def.name))
 	for _, idx := range append(inlineIndexes(def.columns), def.indexes...) {
-		stmts = append(stmts, statement{sql: createIndexSQL(q, def.name, idx, schemaOnIndex)})
+		sql, err := createIndexSQL(d.name(), q, def.name, idx, schemaOnIndex)
+		if err != nil {
+			return nil, err
+		}
+		stmts = append(stmts, statement{sql: sql})
 	}
 	stmts = append(stmts, statement{
 		desc: fmt.Sprintf("recreate the captured triggers of %s", q.table(def.name)),

@@ -100,7 +100,11 @@ func (d postgresDialect) compileCreate(def *tableDef) ([]statement, error) {
 	stmts := []statement{sqlStatement("CREATE TABLE %s (\n\t%s\n)",
 		pgQ.table(def.name), strings.Join(clauses, ",\n\t"))}
 	for _, idx := range append(inlineIndexes(def.columns), def.indexes...) {
-		stmts = append(stmts, statement{sql: createIndexSQL(pgQ, def.name, idx, false)})
+		sql, err := createIndexSQL("postgres", pgQ, def.name, idx, false)
+		if err != nil {
+			return nil, err
+		}
+		stmts = append(stmts, statement{sql: sql})
 	}
 	if def.comment != "" {
 		stmts = append(stmts, d.tableCommentSQL(def.name, def.comment))
@@ -114,13 +118,25 @@ func (d postgresDialect) compileAlter(op *alterTable) ([]statement, error) {
 	for _, ch := range op.changes {
 		switch c := ch.(type) {
 		case *addColumn:
+			if c.col.change {
+				changed, err := d.changeColumnSQL(op.table, c.col)
+				if err != nil {
+					return nil, err
+				}
+				stmts = append(stmts, changed...)
+				continue
+			}
 			clause, err := d.columnSQL(op.table, c.col)
 			if err != nil {
 				return nil, err
 			}
 			stmts = append(stmts, sqlStatement("ALTER TABLE %s ADD COLUMN %s", table, clause))
 			for _, idx := range inlineIndexes([]*columnDef{c.col}) {
-				stmts = append(stmts, statement{sql: createIndexSQL(pgQ, op.table, idx, false)})
+				sql, err := createIndexSQL("postgres", pgQ, op.table, idx, false)
+				if err != nil {
+					return nil, err
+				}
+				stmts = append(stmts, statement{sql: sql})
 			}
 			if c.col.comment != "" {
 				stmts = append(stmts, d.commentSQL(op.table, c.col))
@@ -130,11 +146,19 @@ func (d postgresDialect) compileAlter(op *alterTable) ([]statement, error) {
 		case *renameColumn:
 			stmts = append(stmts, sqlStatement("ALTER TABLE %s RENAME COLUMN %s TO %s", table, pgQ.ident(c.from), pgQ.ident(c.to)))
 		case *addIndex:
-			stmts = append(stmts, statement{sql: createIndexSQL(pgQ, op.table, c.idx, false)})
+			sql, err := createIndexSQL("postgres", pgQ, op.table, c.idx, false)
+			if err != nil {
+				return nil, err
+			}
+			stmts = append(stmts, statement{sql: sql})
 		case *dropIndex:
 			// Indexes live in the table's schema; dropping needs the same
 			// qualification the table carries.
-			stmts = append(stmts, sqlStatement("DROP INDEX %s", pgQ.table(schemaPrefix(op.table)+c.name)))
+			concurrently := ""
+			if c.concurrently {
+				concurrently = "CONCURRENTLY "
+			}
+			stmts = append(stmts, sqlStatement("DROP INDEX %s%s", concurrently, pgQ.table(schemaPrefix(op.table)+c.name)))
 		case *addForeign:
 			stmts = append(stmts, sqlStatement("ALTER TABLE %s ADD %s", table, foreignClause(pgQ, op.table, c.fk)))
 		case *dropForeign:
@@ -157,6 +181,48 @@ func (d postgresDialect) compileAlter(op *alterTable) ([]statement, error) {
 		default:
 			return nil, fmt.Errorf("migrate: postgres: unsupported change %T", ch)
 		}
+	}
+	return stmts, nil
+}
+
+// changeColumnSQL compiles a Change into the ALTER COLUMN statements Postgres
+// needs: unlike MySQL's MODIFY, the type, nullability and default each change
+// on their own. The declaration is a complete restatement, so an omitted
+// default drops any existing one rather than keeping it.
+func (d postgresDialect) changeColumnSQL(table string, c *columnDef) ([]statement, error) {
+	if c.kind == kindEnum {
+		return nil, fmt.Errorf("migrate: postgres emulates enums with a check constraint; change column %q of table %q with DropCheck/Check and a plain type instead", c.name, table)
+	}
+	typ, err := d.typeSQL(c)
+	if err != nil {
+		return nil, err
+	}
+	qt, qc := pgQ.table(table), pgQ.ident(c.name)
+
+	using := ""
+	if c.changeUsing != "" {
+		using = " USING " + c.changeUsing
+	}
+	stmts := []statement{sqlStatement("ALTER TABLE %s ALTER COLUMN %s TYPE %s%s", qt, qc, typ, using)}
+
+	null := "SET NOT NULL"
+	if c.nullable {
+		null = "DROP NOT NULL"
+	}
+	stmts = append(stmts, sqlStatement("ALTER TABLE %s ALTER COLUMN %s %s", qt, qc, null))
+
+	value, err := defaultValueSQL(c, false, "CURRENT_TIMESTAMP")
+	if err != nil {
+		return nil, err
+	}
+	if value != "" {
+		stmts = append(stmts, sqlStatement("ALTER TABLE %s ALTER COLUMN %s SET DEFAULT %s", qt, qc, value))
+	} else {
+		stmts = append(stmts, sqlStatement("ALTER TABLE %s ALTER COLUMN %s DROP DEFAULT", qt, qc))
+	}
+
+	if c.comment != "" {
+		stmts = append(stmts, d.commentSQL(table, c))
 	}
 	return stmts, nil
 }

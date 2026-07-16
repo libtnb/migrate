@@ -149,6 +149,23 @@ t.Foreign("code").References("regions", "code")   // existing column, explicit
 
 Names follow `{table}_{columns}_{index|unique|foreign}`, so dropping by columns (`t.DropIndex("a", "b")`, `t.DropForeign("user_id")`) reconstructs the created name.
 
+Indexes take modifiers; unsupported combinations fail at compile time with advice, never silently:
+
+```go
+t.Unique("name").Where("deleted_at IS NULL")  // partial: live rows only (Postgres, SQLite)
+t.Index("payload").Using("gin")               // index method (Postgres); btree/hash on MySQL
+t.Unique("email").Include("name")             // covering index (Postgres 11+)
+t.Unique("email").NullsNotDistinct()          // one NULL at most (Postgres 15+)
+t.Index("user_id").Concurrently()             // online build (Postgres) — see below
+
+t.IndexExpr("users_email_lower_index", "lower(email)")   // expression index, name required
+t.UniqueExpr("users_email_lower_unique", "lower(email)")
+t.FullText("title", "body")                   // MySQL FULLTEXT; Postgres: IndexExpr + gin
+t.Spatial("location")                         // MySQL SPATIAL geometry index
+```
+
+`.Where` on a unique index is the soft-delete pattern: a deleted row releases its name while two live rows still cannot share one. `.Concurrently()` builds without blocking writes and therefore cannot run inside a transaction — declare the migration `WithoutTransaction()`, which compile enforces; rolling it back drops the index concurrently too. MySQL and SQLite build indexes online anyway and ignore the flag.
+
 ### Altering tables
 
 ```go
@@ -162,7 +179,18 @@ migrate.Add("20260801120000_polish_users", func(s *migrate.Schema) {
 })
 ```
 
-Each change compiles to its own statement and reverses individually; the migration runs in one transaction where the engine allows. Also: `t.RenameIndex(from, to)`, `t.DropIndex`/`DropUnique`/`DropForeign` (by columns, via conventional names), `t.DropPrimary()`, and table comments via `t.Comment(...)`.
+Each change compiles to its own statement and reverses individually; the migration runs in one transaction where the engine allows. Also: `t.RenameIndex(from, to)`, `t.DropIndex`/`DropUnique`/`DropFullText`/`DropSpatial`/`DropForeign` (by columns, via conventional names), `t.DropPrimary()`, and table comments via `t.Comment(...)`.
+
+To alter a column, restate its complete target definition and mark it `.Change()`:
+
+```go
+s.Table("users", func(t *migrate.Table) {
+	t.String("name", 500).Nullable().Change()               // widen + allow NULL
+	t.Integer("age").Change().Using("age::integer")         // Postgres cast for old rows
+})
+```
+
+MySQL compiles a `Change` to `MODIFY COLUMN`; Postgres to `ALTER COLUMN` statements for the type (with the optional `USING` conversion), nullability and default — it is a restatement, so an omitted default drops any existing one. SQLite cannot alter columns: use `Recreate`. Index modifiers, primary keys, auto-increment and generated expressions cannot be restated. Changing a column discards its previous definition, so rolling back needs `WithDown`.
 
 ### Rebuilding tables
 

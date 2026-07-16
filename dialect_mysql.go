@@ -93,7 +93,11 @@ func (d mysqlDialect) compileCreate(def *tableDef) ([]statement, error) {
 	stmts := []statement{sqlStatement("CREATE TABLE %s (\n\t%s\n)%s",
 		myQ.table(def.name), strings.Join(clauses, ",\n\t"), suffix)}
 	for _, idx := range append(inlineIndexes(def.columns), def.indexes...) {
-		stmts = append(stmts, statement{sql: createIndexSQL(myQ, def.name, idx, false)})
+		sql, err := createIndexSQL("mysql", myQ, def.name, idx, false)
+		if err != nil {
+			return nil, err
+		}
+		stmts = append(stmts, statement{sql: sql})
 	}
 	return stmts, nil
 }
@@ -104,20 +108,38 @@ func (d mysqlDialect) compileAlter(op *alterTable) ([]statement, error) {
 	for _, ch := range op.changes {
 		switch c := ch.(type) {
 		case *addColumn:
+			if c.col.change && c.col.changeUsing != "" {
+				return nil, fmt.Errorf("migrate: Using is a Postgres conversion expression; mysql converts column %q of table %q implicitly", c.col.name, op.table)
+			}
 			clause, err := d.columnSQL(c.col, true)
 			if err != nil {
 				return nil, err
 			}
-			stmts = append(stmts, sqlStatement("ALTER TABLE %s ADD COLUMN %s", table, clause))
+			verb := "ADD"
+			if c.col.change {
+				verb = "MODIFY"
+			}
+			stmts = append(stmts, sqlStatement("ALTER TABLE %s %s COLUMN %s", table, verb, clause))
+			if c.col.change {
+				continue
+			}
 			for _, idx := range inlineIndexes([]*columnDef{c.col}) {
-				stmts = append(stmts, statement{sql: createIndexSQL(myQ, op.table, idx, false)})
+				sql, err := createIndexSQL("mysql", myQ, op.table, idx, false)
+				if err != nil {
+					return nil, err
+				}
+				stmts = append(stmts, statement{sql: sql})
 			}
 		case *dropColumn:
 			stmts = append(stmts, sqlStatement("ALTER TABLE %s DROP COLUMN %s", table, myQ.ident(c.name)))
 		case *renameColumn:
 			stmts = append(stmts, sqlStatement("ALTER TABLE %s RENAME COLUMN %s TO %s", table, myQ.ident(c.from), myQ.ident(c.to)))
 		case *addIndex:
-			stmts = append(stmts, statement{sql: createIndexSQL(myQ, op.table, c.idx, false)})
+			sql, err := createIndexSQL("mysql", myQ, op.table, c.idx, false)
+			if err != nil {
+				return nil, err
+			}
+			stmts = append(stmts, statement{sql: sql})
 		case *dropIndex:
 			stmts = append(stmts, sqlStatement("ALTER TABLE %s DROP INDEX %s", table, myQ.ident(c.name)))
 		case *addForeign:

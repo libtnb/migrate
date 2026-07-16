@@ -60,6 +60,10 @@ func analyzeSafety(dialect string, ops []operation) []string {
 			for _, ch := range o.changes {
 				switch c := ch.(type) {
 				case *addColumn:
+					if c.col.change {
+						warn("changing column %q of table %q rewrites the table under lock on most engines, and a narrowing type or a new NOT NULL fails on rows that no longer fit; backfill first and plan for the rewrite time", c.col.name, o.table)
+						continue
+					}
 					// A generated column computes its value for existing rows,
 					// so NOT NULL is safe without a default — which it could
 					// not declare anyway.
@@ -71,8 +75,8 @@ func analyzeSafety(dialect string, ops []operation) []string {
 				case *renameColumn:
 					warn("renaming column %q of table %q to %q is not backward compatible with running code; prefer adding the new column, dual-writing and dropping the old one across deploys", c.from, o.table, c.to)
 				case *addIndex:
-					if dialect == "postgres" {
-						warn("adding index %q blocks writes to %q while it builds; on a large table use CREATE INDEX CONCURRENTLY via Exec on a WithoutTransaction migration", c.idx.resolvedName(o.table), o.table)
+					if dialect == "postgres" && !c.idx.concurrently {
+						warn("adding index %q blocks writes to %q while it builds; on a large table declare it Concurrently() on a WithoutTransaction migration", c.idx.resolvedName(o.table), o.table)
 					}
 				case *addForeign:
 					if dialect == "postgres" {

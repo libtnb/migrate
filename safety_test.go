@@ -39,7 +39,12 @@ func TestAnalyzeSafetyFindings(t *testing.T) {
 		"index on postgres": {
 			"postgres",
 			func(s *Schema) { s.Table("t", func(t *Table) { t.Index("c") }) },
-			"CREATE INDEX CONCURRENTLY",
+			"Concurrently()",
+		},
+		"changed column": {
+			"postgres",
+			func(s *Schema) { s.Table("t", func(t *Table) { t.String("c", 50).Change() }) },
+			"rewrites the table",
 		},
 		"foreign key on postgres": {
 			"postgres",

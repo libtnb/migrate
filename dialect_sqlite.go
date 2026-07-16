@@ -95,7 +95,11 @@ func (d sqliteDialect) compileCreate(def *tableDef) ([]statement, error) {
 	stmts := []statement{sqlStatement("CREATE TABLE %s (\n\t%s\n)",
 		liteQ.table(def.name), strings.Join(clauses, ",\n\t"))}
 	for _, idx := range append(inlineIndexes(def.columns), def.indexes...) {
-		stmts = append(stmts, statement{sql: createIndexSQL(liteQ, def.name, idx, true)})
+		sql, err := createIndexSQL("sqlite", liteQ, def.name, idx, true)
+		if err != nil {
+			return nil, err
+		}
+		stmts = append(stmts, statement{sql: sql})
 	}
 	return stmts, nil
 }
@@ -106,6 +110,9 @@ func (d sqliteDialect) compileAlter(op *alterTable) ([]statement, error) {
 	for _, ch := range op.changes {
 		switch c := ch.(type) {
 		case *addColumn:
+			if c.col.change {
+				return nil, fmt.Errorf("migrate: sqlite cannot change column %q of table %q; use Schema.Recreate", c.col.name, op.table)
+			}
 			if c.col.autoIncr {
 				return nil, fmt.Errorf("migrate: sqlite cannot add auto-increment column %q to existing table %q; declare it in Create, or use Schema.Recreate", c.col.name, op.table)
 			}
@@ -124,14 +131,22 @@ func (d sqliteDialect) compileAlter(op *alterTable) ([]statement, error) {
 			}
 			stmts = append(stmts, sqlStatement("ALTER TABLE %s ADD COLUMN %s", table, clause))
 			for _, idx := range inlineIndexes([]*columnDef{c.col}) {
-				stmts = append(stmts, statement{sql: createIndexSQL(liteQ, op.table, idx, true)})
+				sql, err := createIndexSQL("sqlite", liteQ, op.table, idx, true)
+				if err != nil {
+					return nil, err
+				}
+				stmts = append(stmts, statement{sql: sql})
 			}
 		case *dropColumn:
 			stmts = append(stmts, sqlStatement("ALTER TABLE %s DROP COLUMN %s", table, liteQ.ident(c.name)))
 		case *renameColumn:
 			stmts = append(stmts, sqlStatement("ALTER TABLE %s RENAME COLUMN %s TO %s", table, liteQ.ident(c.from), liteQ.ident(c.to)))
 		case *addIndex:
-			stmts = append(stmts, statement{sql: createIndexSQL(liteQ, op.table, c.idx, true)})
+			sql, err := createIndexSQL("sqlite", liteQ, op.table, c.idx, true)
+			if err != nil {
+				return nil, err
+			}
+			stmts = append(stmts, statement{sql: sql})
 		case *dropIndex:
 			stmts = append(stmts, sqlStatement("DROP INDEX %s", liteQ.table(schemaPrefix(op.table)+c.name)))
 		case *renameIndex:

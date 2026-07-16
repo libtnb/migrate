@@ -534,3 +534,36 @@ func TestSQLiteGeneratedChecksAndCopyFrom(t *testing.T) {
 		t.Error("the generated column should recompute after the rebuild")
 	}
 }
+
+// Partial unique indexes exist for exactly this: a soft-deleted row releases
+// its name while two live rows still cannot share one.
+func TestSQLitePartialUniqueIndex(t *testing.T) {
+	ctx := context.Background()
+	db := openSQLite(t)
+
+	c := migrate.NewCollection()
+	c.Add("001_create_users", func(s *migrate.Schema) {
+		s.Create("users", func(t *migrate.Table) {
+			t.ID()
+			t.String("name")
+			t.TimestampTz("deleted_at").Nullable()
+			t.Unique("name").Where("deleted_at IS NULL")
+		})
+	})
+	m, err := migrate.New(db, migrate.SQLite, migrate.WithCollection(c))
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	if err := m.Up(ctx); err != nil {
+		t.Fatalf("Up: %v", err)
+	}
+
+	mustExec(t, db, `INSERT INTO users (name) VALUES ('alice')`)
+	if _, err := db.Exec(`INSERT INTO users (name) VALUES ('alice')`); err == nil {
+		t.Fatal("a live duplicate name should violate the partial unique index")
+	}
+	mustExec(t, db, `UPDATE users SET deleted_at = '2026-01-01 00:00:00' WHERE name = 'alice'`)
+	if _, err := db.Exec(`INSERT INTO users (name) VALUES ('alice')`); err != nil {
+		t.Fatalf("a soft-deleted row should release the name: %v", err)
+	}
+}
